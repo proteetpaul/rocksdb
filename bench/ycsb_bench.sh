@@ -10,9 +10,9 @@
 # seek_nexts, etc.) live in separate .ini files under workloads/.
 #
 # A top-level bench.ini supplies shared db_bench parameters (num, key_size,
-# value_size, threads, duration, db path, …).  Export DB_DIR to override the
-# database directory from bench.ini.  Export DB_BENCH to set the db_bench
-# binary path; --db_bench_bin overrides DB_BENCH.
+# value_size, threads, duration, db path, reporting, …).  Export DB_DIR to
+# override the database directory from bench.ini. Export DB_BENCH to set the
+# db_bench binary path; --db_bench_bin overrides DB_BENCH.
 #
 # Usage:
 #   ./ycsb_bench.sh [OPTIONS]
@@ -125,6 +125,8 @@ DURATION="${BENCH_VARS[duration]:-60}"
 HISTOGRAM="${BENCH_VARS[histogram]:-false}"
 STATISTICS="${BENCH_VARS[statistics]:-false}"
 COMPRESSION_TYPE="${BENCH_VARS[compression_type]:-none}"
+REPORT_INTERVAL_SECONDS="${BENCH_VARS[report_interval_seconds]:-1}"
+REPORT_DIR="${BENCH_VARS[report_dir]:-$SCRIPT_DIR/reports}"
 
 # ── Resolve db_bench binary: --db_bench_bin, then env DB_BENCH, then search ──
 if [[ -z "$DB_BENCH_BIN" && -n "${DB_BENCH:-}" ]]; then
@@ -165,6 +167,12 @@ echo " threads:        $THREADS"
 echo " duration:       ${DURATION}s"
 echo " compression:    $COMPRESSION_TYPE"
 echo " workloads:      $WORKLOADS"
+if [[ "$REPORT_INTERVAL_SECONDS" -gt 0 ]]; then
+  echo " report_every:   ${REPORT_INTERVAL_SECONDS}s"
+  echo " report_dir:     $REPORT_DIR"
+else
+  echo " report_every:   (disabled)"
+fi
 if [[ -n "$MEMORY_LIMIT_BYTES" ]]; then
   echo " memory_limit:   ${MEMORY_LIMIT_BYTES} bytes (RLIMIT_AS via prlimit or ulimit -v)"
 else
@@ -246,6 +254,8 @@ load_db() {
 run_workload() {
   local label="$1"
   local conf_file="$2"
+  local report_flags=()
+  local report_file=""
 
   echo "============================================================"
   echo " WORKLOAD $label"
@@ -255,10 +265,21 @@ run_workload() {
   local wl_flags
   read -ra wl_flags <<< "$(ini_to_flags "$conf_file")"
 
+  if [[ "$REPORT_INTERVAL_SECONDS" -gt 0 ]]; then
+    mkdir -p "$REPORT_DIR"
+    report_file="$REPORT_DIR/workload_$(echo "$label" | tr '[:upper:]' '[:lower:]')_timeseries.csv"
+    report_flags=(
+      --report_interval_seconds="$REPORT_INTERVAL_SECONDS"
+      --report_file="$report_file"
+    )
+    echo "   report_file: $report_file"
+  fi
+
   run_bench \
     "${COMMON_FLAGS[@]}" \
     --threads="$THREADS" \
     --duration="$DURATION" \
+    "${report_flags[@]}" \
     "${wl_flags[@]}"
 }
 
