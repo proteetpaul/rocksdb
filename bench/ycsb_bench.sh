@@ -10,7 +10,9 @@
 # seek_nexts, etc.) live in separate .ini files under workloads/.
 #
 # A top-level bench.ini supplies shared db_bench parameters (num, key_size,
-# value_size, threads, duration, db path, …).
+# value_size, threads, duration, db path, …).  Export DB_DIR to override the
+# database directory from bench.ini.  Export DB_BENCH to set the db_bench
+# binary path; --db_bench_bin overrides DB_BENCH.
 #
 # Usage:
 #   ./ycsb_bench.sh [OPTIONS]
@@ -19,7 +21,7 @@
 #   --bench_ini <path>        Shared benchmark config      (default: bench/bench.ini)
 #   --options_file <path>     RocksDB options file (INI)   (default: bench/rocksdb_options.ini)
 #   --workload_dir <path>     Directory with workload .ini files (default: bench/workloads)
-#   --db_bench_bin <path>     Path to db_bench binary      (default: auto-detect)
+#   --db_bench_bin <path>     Path to db_bench binary      (overrides env DB_BENCH)
 #   --workloads <list>        Comma-separated workloads    (default: A,B,C,D,E,F)
 #   --memory_limit <size>     Cap process virtual memory (RLIMIT_AS). Examples: 8G, 512M,
 #                             2147483648 (bytes). Uses prlimit(1) when available, else ulimit -v.
@@ -113,7 +115,8 @@ load_ini() {
 load_ini "$BENCH_INI" BENCH_VARS
 
 # Pull required values (with fallback defaults)
-DB_PATH="${BENCH_VARS[db]:-/tmp/rocksdb_ycsb_bench}"
+# DB_DIR (env) overrides bench.ini `db` when set.
+DB_PATH="${DB_DIR:-${BENCH_VARS[db]:-/tmp/rocksdb_ycsb_bench}}"
 NUM="${BENCH_VARS[num]:-1000000}"
 KEY_SIZE="${BENCH_VARS[key_size]:-16}"
 VALUE_SIZE="${BENCH_VARS[value_size]:-1024}"
@@ -123,7 +126,10 @@ HISTOGRAM="${BENCH_VARS[histogram]:-false}"
 STATISTICS="${BENCH_VARS[statistics]:-false}"
 COMPRESSION_TYPE="${BENCH_VARS[compression_type]:-none}"
 
-# ── Auto-detect db_bench binary ──────────────────────────────────────
+# ── Resolve db_bench binary: --db_bench_bin, then env DB_BENCH, then search ──
+if [[ -z "$DB_BENCH_BIN" && -n "${DB_BENCH:-}" ]]; then
+  DB_BENCH_BIN="$DB_BENCH"
+fi
 if [[ -z "$DB_BENCH_BIN" ]]; then
   for candidate in \
       "$REPO_ROOT/build/db_bench" \
@@ -134,10 +140,14 @@ if [[ -z "$DB_BENCH_BIN" ]]; then
       break
     fi
   done
-  if [[ -z "$DB_BENCH_BIN" ]]; then
-    echo "Error: cannot find db_bench binary. Specify with --db_bench_bin." >&2
-    exit 1
-  fi
+fi
+if [[ -z "$DB_BENCH_BIN" ]]; then
+  echo "Error: cannot find db_bench binary. Set DB_BENCH or use --db_bench_bin." >&2
+  exit 1
+fi
+if [[ ! -x "$DB_BENCH_BIN" ]]; then
+  echo "Error: db_bench is not executable: $DB_BENCH_BIN" >&2
+  exit 1
 fi
 
 echo "============================================================"
