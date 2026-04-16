@@ -23,9 +23,9 @@
 #   --workload_dir <path>     Directory with workload .ini files (default: bench/workloads)
 #   --db_bench_bin <path>     Path to db_bench binary      (overrides env DB_BENCH)
 #   --workloads <list>        Comma-separated workloads    (default: A,B,C,D,E,F)
-#   --memory_limit <size>     Cap process virtual memory (RLIMIT_AS). Examples: 8G, 512M,
-#                             2147483648 (bytes). Uses prlimit(1) when available, else ulimit -v.
-#                             Omit or use 0/none to disable.
+#   --memory_limit <size>     cgroup memory cap (MemoryMax) for each db_bench run. Examples:
+#                             8G, 512M, 2147483648 (bytes). Uses systemd-run(1) --user --scope.
+#                             Requires a user systemd session (logind). Omit or use 0/none to disable.
 #
 
 set -euo pipefail
@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ── Parse --memory_limit to bytes (RLIMIT_AS) ─────────────────────────
+# ── Parse --memory_limit to bytes (for systemd MemoryMax=) ───────────
 # Accepts: plain integer = bytes; suffix K/M/G/T = binary multiples (1024^n).
 # 0, none, empty = unlimited.
 MEMORY_LIMIT_BYTES=""
@@ -174,7 +174,7 @@ else
   echo " report_every:   (disabled)"
 fi
 if [[ -n "$MEMORY_LIMIT_BYTES" ]]; then
-  echo " memory_limit:   ${MEMORY_LIMIT_BYTES} bytes (RLIMIT_AS via prlimit or ulimit -v)"
+  echo " memory_limit:   ${MEMORY_LIMIT_BYTES} bytes (cgroup MemoryMax via systemd-run --user --scope)"
 else
   echo " memory_limit:   (none)"
 fi
@@ -212,19 +212,19 @@ ini_to_flags() {
   echo "${flags[@]}"
 }
 
-# ── Helper: run db_bench (optional RLIMIT_AS memory cap) ─────────────
+# ── Helper: run db_bench (optional cgroup memory cap via systemd) ─────
 run_bench() {
   if [[ -n "$MEMORY_LIMIT_BYTES" ]]; then
-    if command -v prlimit >/dev/null 2>&1; then
-      echo ">>> prlimit --as=${MEMORY_LIMIT_BYTES} -- $DB_BENCH_BIN $*"
-      prlimit --as="$MEMORY_LIMIT_BYTES" -- "$DB_BENCH_BIN" "$@"
-    else
-      # bash ulimit -v: maximum virtual memory (KiB on Linux)
-      local kb=$(( MEMORY_LIMIT_BYTES / 1024 ))
-      (( kb < 1 )) && kb=1
-      echo ">>> (ulimit -v ${kb}) $DB_BENCH_BIN $*"
-      ( ulimit -S -v "$kb" && exec "$DB_BENCH_BIN" "$@" )
+    if ! command -v systemd-run >/dev/null 2>&1; then
+      echo "Error: systemd-run not found; --memory_limit requires systemd (cgroups)." >&2
+      exit 1
     fi
+    # Transient scope under the user manager: inherits env/cwd; MemoryMax applies
+    # to the cgroup (RSS + cache charged to the group, unlike RLIMIT_AS).
+    echo ">>> systemd-run --user --scope -p MemoryMax=${MEMORY_LIMIT_BYTES} -- $DB_BENCH_BIN $*"
+    systemd-run --user --scope \
+      -p "MemoryMax=${MEMORY_LIMIT_BYTES}" \
+      -- "$DB_BENCH_BIN" "$@"
   else
     echo ">>> $DB_BENCH_BIN $*"
     "$DB_BENCH_BIN" "$@"
