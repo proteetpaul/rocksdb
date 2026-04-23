@@ -203,7 +203,7 @@ def run_all_samples(
             "systemd-run not found on PATH; LHS experiments require it for cgroups "
             "MemoryMax (see bench/ycsb_bench.sh --memory_limit)."
         )
-    mem_raw = memory_limit if memory_limit is not None else os.environ.get("LHS_MEMORY_LIMIT", "32G")
+    mem_raw = memory_limit if memory_limit is not None else os.environ.get("LHS_MEMORY_LIMIT", "10G")
     memory_max_bytes = parse_memory_limit_bytes(mem_raw)
 
     specs, samples, _meta = read_samples_file(samples_path)
@@ -211,7 +211,7 @@ def run_all_samples(
 
     bench_vars = load_simple_ini(bench_ini)
     db_path = Path(os.environ.get("DB_DIR") or bench_vars.get("db", "/tmp/rocksdb_ycsb_bench")).expanduser()
-    num = bench_vars.get("num", "1000000")
+    num = bench_vars.get("num", "100_000_000")
     key_size = bench_vars.get("key_size", "16")
     value_size = bench_vars.get("value_size", "1024")
     threads = bench_vars.get("threads", "16")
