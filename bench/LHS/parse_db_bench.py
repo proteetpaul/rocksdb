@@ -55,11 +55,13 @@ def parse_read_write_histograms(text: str) -> tuple[tuple[float, float] | None, 
         if pm:
             read_pair = (float(pm.group(1)), float(pm.group(2)))
 
-    m_write = re.search(
+    m_write = None
+    for m in re.finditer(
         r"Microseconds per write:\s*(.*?)(?=Microseconds per |\Z)",
         text,
         re.DOTALL | re.IGNORECASE,
-    )
+    ):
+        m_write = m
     if m_write:
         pm = _percentiles_re.search(m_write.group(1))
         if pm:
