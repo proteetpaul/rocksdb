@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -13,6 +14,8 @@ from typing import Any
 from .options_file import write_options_file
 from .parameter_space import DremelConfig, cli_flags, option_overrides
 from .parse_db_bench import DbBenchMetrics, parse_db_bench_output
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -45,7 +48,6 @@ class DbBenchContext:
     report_interval_seconds: str = "1"
     report_dir: str = "bench/reports"
     memory_limit: str | None = None
-    use_systemd_scope: bool = False
     timeout_sec: float | None = None
 
 
@@ -95,6 +97,11 @@ def run_db_bench_evaluation(
 ) -> DbBenchRunResult:
     """Run load + workload for one Dremel candidate and parse throughput."""
 
+    logger.info(
+        "Evaluating config %s for %ss with db_bench",
+        config.index,
+        duration_sec,
+    )
     context.out_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = context.out_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +112,11 @@ def run_db_bench_evaluation(
     load_flags = _ini_to_argv(load_simple_ini(context.workload_dir / "load.ini"))
     workload_flags = _ini_to_argv(load_simple_ini(context.workload_dir / "workload_a.ini"))
     extra_flags = cli_flags(config.params)
+    logger.info(
+        "Running config %s under systemd scope%s",
+        config.index,
+        f" with MemoryMax={context.memory_limit}" if context.memory_limit else "",
+    )
 
     fd, options_path_raw = tempfile.mkstemp(
         prefix=f"dremel_options_{config.index}_",
@@ -137,6 +149,11 @@ def run_db_bench_evaluation(
         load_cp = _run(load_argv, timeout_sec=context.timeout_sec)
         full_log.append(load_cp.stdout or "")
         if load_cp.returncode != 0:
+            logger.warning(
+                "Load phase failed for config %s with exit code %s",
+                config.index,
+                load_cp.returncode,
+            )
             return _finish(config, duration_sec, "load_failed", full_log, log_path)
 
         run_flags = [
@@ -151,11 +168,30 @@ def run_db_bench_evaluation(
         run_cp = _run(run_argv, timeout_sec=context.timeout_sec)
         full_log.append(run_cp.stdout or "")
         status = "ok" if run_cp.returncode == 0 else "run_failed"
+        if run_cp.returncode != 0:
+            logger.warning(
+                "Run phase failed for config %s at %ss with exit code %s",
+                config.index,
+                duration_sec,
+                run_cp.returncode,
+            )
         if status == "ok" and parse_db_bench_output("".join(full_log)).throughput_qps is None:
             status = "parse_incomplete"
+            logger.warning(
+                "Could not parse throughput for config %s at %ss; see %s",
+                config.index,
+                duration_sec,
+                log_path,
+            )
         return _finish(config, duration_sec, status, full_log, log_path)
     except subprocess.TimeoutExpired as exc:
         full_log.append(str(exc))
+        logger.warning(
+            "db_bench timed out for config %s at %ss after %s seconds",
+            config.index,
+            duration_sec,
+            context.timeout_sec,
+        )
         return _finish(config, duration_sec, "timeout", full_log, log_path)
     finally:
         if options_path.is_file():
@@ -206,8 +242,6 @@ def _report_flags(context: DbBenchContext, config: DremelConfig, duration_sec: i
 
 def _scoped_argv(context: DbBenchContext, db_bench_flags: list[str]) -> list[str]:
     inner = [str(context.db_bench), *db_bench_flags]
-    if not context.use_systemd_scope:
-        return inner
     if context.memory_limit is None:
         return ["systemd-run", "--user", "--scope", "--", *inner]
     return ["systemd-run", "--user", "--scope", "-p", f"MemoryMax={context.memory_limit}", "--", *inner]

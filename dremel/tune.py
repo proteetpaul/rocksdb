@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import random
 import sys
 from pathlib import Path
@@ -32,6 +33,8 @@ from .db_bench import (
 from .parameter_space import BenchmarkShape, DremelConfig, compute_fused_features, sample_candidates
 from .parse_db_bench import DbBenchMetrics
 
+logger = logging.getLogger(__name__)
+
 
 def run_tuning(
     *,
@@ -50,6 +53,23 @@ def run_tuning(
     """Run Dremel and return the recommendation payload."""
 
     shape = benchmark_shape or _benchmark_shape_from_ini(context.bench_ini)
+    logger.info(
+        "Starting Dremel tuning: candidates=%s buckets=%s seed=%s time_points=%s "
+        "ucb_rounds=%s ucb_top_k=%s",
+        candidate_count,
+        buckets_per_feature,
+        seed,
+        time_points_sec,
+        ucb_rounds,
+        ucb_top_k,
+    )
+    logger.info(
+        "Benchmark shape: num=%s key_size=%s value_size=%s memory_budget=%s",
+        shape.num_keys,
+        shape.key_size_bytes,
+        shape.value_size_bytes,
+        memory_budget_bytes,
+    )
     rng = random.Random(seed)
     candidates = sample_candidates(
         memory_budget_bytes=memory_budget_bytes,
@@ -62,6 +82,7 @@ def run_tuning(
         benchmark_shape=shape,
         memory_budget_bytes=memory_budget_bytes,
     )
+    logger.info("Built %s bandit arms from %s candidates", len(arms), len(candidates))
     arm_by_config_index = {config.index: arm for arm in arms for config in arm.configs}
     config_by_index = {config.index: config for config in candidates}
     tried_indices: set[int] = set()
@@ -70,16 +91,25 @@ def run_tuning(
 
     if resume:
         db_results, prior_by_key = _load_prior_results(context.out_dir / "results.csv", config_by_index)
+        logger.info("Loaded %s prior evaluations for resume", len(db_results))
         for result in db_results:
             if result.status == "ok":
                 arm_by_config_index[result.config.index].rewards.append(result.reward)
                 tried_indices.add(result.config.index)
     else:
+        logger.info("Clearing previous Dremel outputs under %s", context.out_dir)
         _clear_previous_outputs(context.out_dir)
 
     def evaluate(config: DremelConfig, duration: int) -> EvaluationResult:
         cached = prior_by_key.get((config.index, duration))
         if cached is not None:
+            logger.info(
+                "Reusing cached result for config %s at %ss: status=%s reward=%s",
+                config.index,
+                duration,
+                cached.status,
+                cached.reward,
+            )
             return EvaluationResult(
                 config=config,
                 reward=cached.reward,
@@ -87,11 +117,26 @@ def run_tuning(
                 status=cached.status,
             )
         db_result = evaluate_db_bench(context, config, duration_sec=duration)
+        logger.info(
+            "Evaluation finished for config %s at %ss: status=%s reward=%s",
+            config.index,
+            duration,
+            db_result.status,
+            db_result.reward,
+        )
         db_results.append(db_result)
         _append_result_csv(context.out_dir / "results.csv", db_result)
         if db_result.status == "ok":
             arm_by_config_index[config.index].rewards.append(db_result.reward)
             tried_indices.add(config.index)
+        else:
+            logger.warning(
+                "Evaluation for config %s at %ss did not succeed: status=%s log=%s",
+                config.index,
+                duration,
+                db_result.status,
+                db_result.log_path,
+            )
         _write_state(context.out_dir, arms, db_results)
         return EvaluationResult(
             config=config,
@@ -108,27 +153,38 @@ def run_tuning(
         )
         for arm in arms
     ]
+    logger.info("Running initial successive halving over %s arm representatives", len(initial_configs))
     successive_halving(initial_configs, time_points_sec, evaluate)
 
-    for _round in range(ucb_rounds):
+    for round_idx in range(ucb_rounds):
         sampled = []
         for arm in select_ucb_arms(arms, top_k=ucb_top_k):
             config = sample_untried_config(arm, tried_indices, rng)
             if config is not None:
                 sampled.append(config)
         if not sampled:
+            logger.warning("No untried configs available for UCB round %s; stopping early", round_idx + 1)
             break
+        logger.info("Running UCB round %s with %s sampled configs", round_idx + 1, len(sampled))
         successive_halving(sampled, time_points_sec, evaluate)
 
     successful = [result for result in db_results if result.status == "ok"]
     if not successful:
+        logger.warning("Dremel completed without any successful db_bench evaluations")
         raise RuntimeError("Dremel did not complete any successful db_bench evaluations")
     best = max(successful, key=lambda result: result.reward)
+    logger.info(
+        "Dremel best config=%s reward=%s duration=%ss",
+        best.config.index,
+        best.reward,
+        best.duration_sec,
+    )
     payload = _recommendation_payload(
         best, candidates, arms, db_results, shape, memory_budget_bytes
     )
     context.out_dir.mkdir(parents=True, exist_ok=True)
     (context.out_dir / "recommendation.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    logger.info("Wrote recommendation to %s", context.out_dir / "recommendation.json")
     return payload
 
 
@@ -151,15 +207,16 @@ def main() -> int:
     parser.add_argument("--ucb-rounds", type=int, default=3)
     parser.add_argument("--ucb-top-k", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=None)
-    parser.add_argument("--systemd-scope", action="store_true")
     parser.add_argument("--memory-limit", type=str, default=None)
     parser.add_argument("--resume", action="store_true", help="Reuse prior results.csv in --out")
     parser.add_argument("--num", type=float, default=None, help="Override benchmark num for Dremel feature estimates")
     parser.add_argument("--key-size", type=float, default=None, help="Override benchmark key_size for Dremel feature estimates")
     parser.add_argument("--value-size", type=float, default=None, help="Override benchmark value_size for Dremel feature estimates")
     parser.add_argument("--threads", type=int, default=None, help="Override db_bench workload threads")
+    parser.add_argument("--log-level", default="INFO", help="Python logging level (default: INFO)")
     args = parser.parse_args()
 
+    _configure_logging(args.log_level)
     time_points = _parse_time_points(args.time_points)
     bench_vars = load_simple_ini(args.bench_ini.resolve())
     benchmark_shape = _benchmark_shape_from_args(args, args.bench_ini.resolve())
@@ -169,8 +226,8 @@ def main() -> int:
         base_options=args.base_options.resolve(),
         workload_dir=args.workload_dir.resolve(),
         out_dir=args.out.resolve(),
-        num=_db_bench_number(benchmark_shape.num_keys),
         key_size=_db_bench_number(benchmark_shape.key_size_bytes),
+        num=_db_bench_number(benchmark_shape.num_keys),
         value_size=_db_bench_number(benchmark_shape.value_size_bytes),
         threads=str(args.threads if args.threads is not None else bench_vars.get("threads", "16")),
         compression_type=bench_vars.get("compression_type", "none"),
@@ -179,7 +236,6 @@ def main() -> int:
         report_interval_seconds=bench_vars.get("report_interval_seconds", "0"),
         report_dir=bench_vars.get("report_dir", "bench/reports"),
         memory_limit=args.memory_limit,
-        use_systemd_scope=args.systemd_scope,
         timeout_sec=args.timeout,
     )
     payload = run_tuning(
@@ -207,6 +263,7 @@ def _append_result_csv(path: Path, result: DbBenchRunResult) -> None:
         if not exists:
             writer.writeheader()
         writer.writerow(row)
+    logger.info("Appended result row to %s", path)
 
 
 def _write_state(out_dir: Path, arms: list[Arm], results: list[DbBenchRunResult]) -> None:
@@ -259,6 +316,8 @@ def _load_prior_results(
             )
             results.append(result)
             by_key[(config_index, duration_sec)] = result
+    if results and not by_key:
+        logger.warning("Loaded %s prior rows from %s but none matched current candidates", len(results), path)
     return results, by_key
 
 
@@ -267,6 +326,7 @@ def _clear_previous_outputs(out_dir: Path) -> None:
         path = out_dir / filename
         if path.is_file():
             path.unlink()
+            logger.info("Removed previous output %s", path)
 
 
 def _recommendation_payload(
@@ -318,6 +378,7 @@ def _benchmark_shape_from_args(args: argparse.Namespace, bench_ini: Path) -> Ben
 
 def _benchmark_shape_from_ini(bench_ini: Path) -> BenchmarkShape:
     if not bench_ini.is_file():
+        logger.warning("bench.ini not found at %s; using default benchmark shape", bench_ini)
         return BenchmarkShape()
     values = load_simple_ini(bench_ini)
     return BenchmarkShape(
@@ -357,6 +418,16 @@ def _optional_float(value: str | None) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def _configure_logging(level_name: str) -> None:
+    level = getattr(logging, level_name.upper(), None)
+    if not isinstance(level, int):
+        raise ValueError(f"invalid log level: {level_name}")
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 if __name__ == "__main__":
