@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .options_file import write_options_file
-from .parameter_space import DremelConfig, cli_flags, option_overrides
-from .parse_db_bench import DbBenchMetrics, parse_db_bench_output
+from options_file import write_options_file
+from parameter_space import DremelConfig, cli_flags, option_overrides
+from parse_db_bench import DbBenchMetrics, parse_db_bench_output
 
 logger = logging.getLogger(__name__)
 

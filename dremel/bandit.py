@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
-from .parameter_space import (
+from parameter_space import (
     DEFAULT_BENCHMARK_SHAPE,
     BenchmarkShape,
     DremelConfig,

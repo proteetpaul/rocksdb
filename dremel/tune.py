@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from .bandit import (
+from bandit import (
     Arm,
     EvaluationResult,
     build_arms,
@@ -21,7 +21,7 @@ from .bandit import (
     select_ucb_arms,
     successive_halving,
 )
-from .db_bench import (
+from db_bench import (
     DbBenchContext,
     DbBenchRunResult,
     find_db_bench,
@@ -30,8 +30,8 @@ from .db_bench import (
     result_row,
     run_db_bench_evaluation,
 )
-from .parameter_space import BenchmarkShape, DremelConfig, compute_fused_features, sample_candidates
-from .parse_db_bench import DbBenchMetrics
+from parameter_space import BenchmarkShape, DremelConfig, compute_fused_features, sample_candidates
+from parse_db_bench import DbBenchMetrics
 
 logger = logging.getLogger(__name__)
 
