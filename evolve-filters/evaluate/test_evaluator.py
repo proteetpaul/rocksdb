@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from evaluate.evaluator import evaluate
+from evaluate.evaluator import _force_evolve_dummy_filter_policy, evaluate
 
 
 class TestOpenEvolveEvaluator(unittest.TestCase):
@@ -50,7 +50,9 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            load_output = "fillrandom : 4.0 micros/op 20000 ops/sec 1.0 seconds 10000 operations\n"
+            load_output = (
+                "fillrandom : 4.0 micros/op 20000 ops/sec 1.0 seconds 10000 operations\n"
+            )
             run_output = (
                 "readrandomwriterandom : 10.000 micros/op 50000 ops/sec 1.000 seconds 1000000 operations\n"
                 "Microseconds per read:\n"
@@ -58,9 +60,15 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                 "Microseconds per write:\n"
                 "Percentiles: P50: 7.00 P75: 10.00 P99: 25.00\n"
                 "STATISTICS:\n"
-                "rocksdb.compact.read.bytes COUNT : 111\n"
-                "rocksdb.compaction.times.micros P50 : 1 P99 : 9\n"
-                "rocksdb.block.cache.hit COUNT : 12345\n"
+                "rocksdb.bloom.filter.useful COUNT : 100\n"
+                "rocksdb.bloom.filter.full.positive COUNT : 40\n"
+                "rocksdb.bloom.filter.full.true.positive COUNT : 30\n"
+                "rocksdb.bloom.filter.prefix.checked COUNT : 12\n"
+                "rocksdb.bloom.filter.prefix.useful COUNT : 9\n"
+                "rocksdb.bloom.filter.prefix.true.positive COUNT : 2\n"
+                "rocksdb.compute.bits.per.key.micros P50 : 3 P99 : 12 COUNT : 250\n"
+                "Level[0]: # entries=100 rocksdb.filter.size: 1024\n"
+                "Level[1]: # entries=200 rocksdb.filter.size: 2048\n"
             )
 
             captured_commands: list[list[str]] = []
@@ -79,26 +87,72 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                     "DB_DIR": str(db_dir),
                 },
                 clear=False,
-            ), mock.patch("evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"), mock.patch(
+            ), mock.patch(
+                "evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"
+            ), mock.patch(
                 "evaluate.evaluator.subprocess.run",
                 side_effect=fake_run,
             ):
                 result = evaluate(str(candidate))
 
             self.assertEqual(result.artifacts.get("status"), "ok")
-            self.assertEqual(result.metrics["combined_score"], 50000.0)
+            self.assertGreater(result.metrics["combined_score"], 0.0)
             self.assertEqual(result.metrics["throughput_qps"], 50000.0)
             self.assertEqual(result.metrics["read_p99_us"], 18.0)
             self.assertEqual(result.metrics["write_p99_us"], 25.0)
-            self.assertIn("rocksdb.compact.read.bytes.count", result.metrics)
-            self.assertIn("rocksdb.compaction.times.micros.p99", result.metrics)
-            self.assertNotIn("rocksdb.block.cache.hit.count", result.metrics)
+            self.assertEqual(result.metrics["live_sst_filter_bytes"], 3072.0)
+            self.assertIn("rocksdb.bloom.filter.useful.count", result.metrics)
+            self.assertIn("rocksdb.bloom.filter.full.positive.count", result.metrics)
+            self.assertIn("bloom.full.observed_fp_rate", result.metrics)
+            self.assertEqual(
+                result.metrics["rocksdb.compute.bits.per.key.micros.p99"], 12.0
+            )
+            self.assertEqual(
+                result.metrics["rocksdb.compute.bits.per.key.micros.count"], 250.0
+            )
+            self.assertNotIn("rocksdb.compaction.times.micros.p99", result.metrics)
 
             self.assertEqual(len(captured_commands), 2)
             for argv in captured_commands:
                 self.assertEqual(argv[0:4], ["systemd-run", "--user", "--scope", "-p"])
                 self.assertEqual(argv[4], f"MemoryMax={2 * 1024**3}")
                 self.assertIn("--statistics=true", argv)
+                self.assertIn("--show_table_properties=true", argv)
+                self.assertIn("--stats_per_interval=true", argv)
+
+    def test_force_evolve_dummy_filter_policy_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_options = root / "base.ini"
+            base_options.write_text(
+                '\n'.join(
+                    [
+                        '[Version]',
+                        '  rocksdb_version=11.1.0',
+                        '[TableOptions/BlockBasedTable "default"]',
+                        "  filter_policy=rocksdb.BloomFilter:10:false",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            runtime_config = {"base_options_file": str(base_options)}
+            candidate_config: dict[str, object] = {
+                "options_overrides": {
+                    '[TableOptions/BlockBasedTable "default"]': {
+                        "block_size": "4096"
+                    }
+                }
+            }
+
+            _force_evolve_dummy_filter_policy(runtime_config, candidate_config)
+
+            section = candidate_config["options_overrides"][
+                '[TableOptions/BlockBasedTable "default"]'
+            ]
+            self.assertEqual(section["filter_policy"], "rocksdb.EvolveDummyFilter")
+            self.assertEqual(section["block_size"], "4096")
 
     def test_missing_required_memory_limit_returns_error_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,7 +232,9 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                     "DB_DIR": str(db_dir),
                 },
                 clear=False,
-            ), mock.patch("evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"), mock.patch(
+            ), mock.patch(
+                "evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"
+            ), mock.patch(
                 "evaluate.evaluator.subprocess.run",
                 side_effect=fake_run,
             ):
@@ -190,3 +246,4 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

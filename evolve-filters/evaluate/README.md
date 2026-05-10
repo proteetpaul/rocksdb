@@ -1,6 +1,8 @@
-# OpenEvolve db_bench Evaluator
+# OpenEvolve db_bench Evaluator (Bloom Focus)
 
-This directory provides an OpenEvolve-compatible `evaluate(program_path)` that runs a RocksDB db_bench load + workload sequence and returns an `EvaluationResult`.
+This directory provides an OpenEvolve-compatible `evaluate(program_path)` that
+runs a RocksDB db_bench load + workload sequence and returns an
+`EvaluationResult`.
 
 ## Required environment variables
 
@@ -10,9 +12,11 @@ This directory provides an OpenEvolve-compatible `evaluate(program_path)` that r
 
 ## Hard requirements enforced by evaluator
 
-- `statistics=true` is always enabled for db_bench (not configurable).
+- `statistics=true` is always enabled for db_bench.
 - each db_bench invocation is wrapped in `systemd-run --user --scope`.
 - cgroup memory limit (`MemoryMax`) is always applied from config `memory_limit`.
+- table properties output is forced via `show_table_properties=true` and
+  `stats_per_interval=true` so live filter-size extraction is available.
 
 ## Runtime config file
 
@@ -32,10 +36,8 @@ Important fields:
 
 `program_path` is read as JSON. Supported keys:
 
-- `db_bench_flags`: flat map merged into db_bench flags, for example:
-  - `{"max_background_jobs": 8, "level0_file_num_compaction_trigger": 6}`
-- `options_overrides`: nested section map for options file patching, for example:
-  - `{"[DBOptions]":{"max_background_jobs":"8"}}`
+- `db_bench_flags`: flat map merged into db_bench flags
+- `options_overrides`: nested section map for options file patching
 
 If `options_overrides` is provided, runtime config must include `base_options_file`.
 
@@ -43,9 +45,13 @@ If `options_overrides` is provided, runtime config must include `base_options_fi
 
 The returned `EvaluationResult.metrics` includes:
 
-- `combined_score` (throughput-based objective)
+- `combined_score` (throughput plus Bloom-quality/memory objective)
 - `throughput_qps`
 - `read_p50_us`, `read_p99_us`, `write_p50_us`, `write_p99_us`
-- compaction-only statistics extracted from RocksDB `STATISTICS:` output
+- Bloom counters extracted from `rocksdb.bloom.filter.*`
+- derived full-filter FP-rate metrics
+- `live_sst_filter_bytes` parsed from aggregated table properties
 
-Any non-success status is returned as `combined_score=0.0` with details in `artifacts`.
+Any non-success status is returned as `combined_score=0.0` with details in
+`artifacts`.
+

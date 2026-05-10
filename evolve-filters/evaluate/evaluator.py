@@ -2,28 +2,31 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import importlib.util
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+EVOLVE_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+for candidate_root in (WORKSPACE_ROOT, EVOLVE_ROOT):
+    if str(candidate_root) not in sys.path:
+        sys.path.insert(0, str(candidate_root))
 
 from dremel.options_file import write_options_file
 from dremel.parse_db_bench import parse_db_bench_output
 
-from evaluate.parse_stats import parse_compaction_statistics
+from evaluate.parse_stats import parse_bloom_statistics, parse_live_sst_filter_bytes
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class EvaluationResult:
@@ -32,13 +35,7 @@ class EvaluationResult:
 
 
 def _load_openevolve_evaluation_result() -> type[EvaluationResult]:
-    module_path = (
-        REPO_ROOT
-        / "evolve-compaction"
-        / "openevolve"
-        / "openevolve"
-        / "evaluation_result.py"
-    )
+    module_path = EVOLVE_ROOT / "openevolve" / "openevolve" / "evaluation_result.py"
     if not module_path.is_file():
         logger.warning(
             "OpenEvolve EvaluationResult module not found at %s; using local fallback.",
@@ -89,6 +86,7 @@ def evaluate(program_path: str) -> EvaluationResult:
         runtime_config_path = _required_env_path("OPENEVOLVE_EVAL_CONFIG")
         runtime_config = _load_json(runtime_config_path)
         candidate_config = _load_json(Path(program_path))
+        _force_evolve_dummy_filter_policy(runtime_config, candidate_config)
         logger.info(
             "Loaded runtime config from %s and candidate config from %s",
             runtime_config_path,
@@ -111,12 +109,18 @@ def evaluate(program_path: str) -> EvaluationResult:
             timeout_sec,
         )
 
-        bench_values = _load_simple_ini(_resolve_path(runtime_config, "bench_ini", default="bench/bench.ini"))
-        load_values = _load_simple_ini(_resolve_path(runtime_config, "load_ini", default="bench/workloads/load.ini"))
+        bench_values = _load_simple_ini(
+            _resolve_path(runtime_config, "bench_ini", default="bench/bench.ini")
+        )
+        load_values = _load_simple_ini(
+            _resolve_path(runtime_config, "load_ini", default="bench/workloads/load.ini")
+        )
         workload_values = _load_simple_ini(_resolve_path(runtime_config, "workload_ini"))
 
         db_bench_flags = _candidate_db_bench_flags(candidate_config)
-        common_flags = _common_db_bench_flags(runtime_config, bench_values, db_dir, db_bench_flags)
+        common_flags = _common_db_bench_flags(
+            runtime_config, bench_values, db_dir, db_bench_flags
+        )
         options_file_path = _maybe_build_options_file(runtime_config, candidate_config)
 
         if options_file_path is not None:
@@ -131,7 +135,9 @@ def evaluate(program_path: str) -> EvaluationResult:
             _recreate_dir(db_dir)
             logger.info("Recreated database directory %s", db_dir)
 
-            load_argv = _scoped_argv(db_bench, common_flags + load_flags, memory_limit_bytes)
+            load_argv = _scoped_argv(
+                db_bench, common_flags + load_flags, memory_limit_bytes
+            )
             full_log.append(_argv_line(load_argv))
             logger.info("Starting db_bench load phase (MemoryMax=%s)", memory_limit_bytes)
             load_result = _run(load_argv, timeout_sec=timeout_sec)
@@ -149,9 +155,13 @@ def evaluate(program_path: str) -> EvaluationResult:
                 )
             logger.info("Load phase completed successfully")
 
-            run_argv = _scoped_argv(db_bench, common_flags + workload_flags, memory_limit_bytes)
+            run_argv = _scoped_argv(
+                db_bench, common_flags + workload_flags, memory_limit_bytes
+            )
             full_log.append("\n" + _argv_line(run_argv))
-            logger.info("Starting db_bench workload phase (MemoryMax=%s)", memory_limit_bytes)
+            logger.info(
+                "Starting db_bench workload phase (MemoryMax=%s)", memory_limit_bytes
+            )
             run_result = _run(run_argv, timeout_sec=timeout_sec)
             full_log.append(run_result.stdout or "")
             if run_result.returncode != 0:
@@ -169,32 +179,40 @@ def evaluate(program_path: str) -> EvaluationResult:
 
             output_text = "".join(full_log)
             perf_metrics = parse_db_bench_output(output_text)
-            compaction_stats = parse_compaction_statistics(output_text)
+            bloom_stats = parse_bloom_statistics(output_text)
+            live_sst_filter_bytes = parse_live_sst_filter_bytes(output_text)
 
             throughput = perf_metrics.throughput_qps or 0.0
             read_p99 = perf_metrics.read_p99_us or 0.0
             write_p99 = perf_metrics.write_p99_us or 0.0
-            if perf_metrics.throughput_qps is None:
-                logger.warning(
-                    "Could not parse throughput from db_bench output; combined_score will be 0.0"
-                )
+
+            observed_fp_rate = bloom_stats.get("bloom.full.observed_fp_rate", 0.0)
+            latency_factor = 1.0 / (1.0 + (read_p99 / 1000.0))
+            fp_factor = max(0.0, 1.0 - observed_fp_rate)
+            memory_factor = 1.0 / (1.0 + (live_sst_filter_bytes / (64.0 * 1024 * 1024)))
+            combined_score = throughput * latency_factor * fp_factor * memory_factor
 
             metrics: dict[str, float] = {
-                "combined_score": throughput,
+                "combined_score": combined_score,
                 "throughput_qps": throughput,
                 "read_p99_us": read_p99,
                 "write_p99_us": write_p99,
                 "read_p50_us": perf_metrics.read_p50_us or 0.0,
                 "write_p50_us": perf_metrics.write_p50_us or 0.0,
+                "live_sst_filter_bytes": live_sst_filter_bytes,
+                "score.latency_factor": latency_factor,
+                "score.fp_factor": fp_factor,
+                "score.memory_factor": memory_factor,
             }
-            metrics.update(compaction_stats)
+            metrics.update(bloom_stats)
 
             logger.info(
-                "Evaluation ok throughput_qps=%s read_p99_us=%s write_p99_us=%s compaction_stat_keys=%s",
+                "Evaluation ok throughput_qps=%s read_p99_us=%s bloom_stat_keys=%s filter_bytes=%s combined_score=%s",
                 perf_metrics.throughput_qps,
                 perf_metrics.read_p99_us,
-                perf_metrics.write_p99_us,
-                len(compaction_stats),
+                len(bloom_stats),
+                live_sst_filter_bytes,
+                combined_score,
             )
             return EvaluationResult(
                 metrics=metrics,
@@ -252,7 +270,7 @@ def _resolve_path(config: dict[str, Any], key: str, default: str | None = None) 
         raise ValueError(f"{key} must be a non-empty path string")
     path = Path(value).expanduser()
     if not path.is_absolute():
-        path = REPO_ROOT / path
+        path = WORKSPACE_ROOT / path
     resolved = path.resolve()
     if not resolved.is_file():
         raise FileNotFoundError(f"{key} does not exist: {resolved}")
@@ -298,6 +316,9 @@ def _common_db_bench_flags(
     merged.pop("db", None)
     merged["db"] = str(db_dir)
     merged["statistics"] = "true"
+    merged["show_table_properties"] = "true"
+    merged["stats_per_interval"] = "true"
+    merged.setdefault("stats_interval", "1")
 
     user_common = runtime_config.get("common_db_bench_flags", {})
     if user_common is not None:
@@ -305,6 +326,9 @@ def _common_db_bench_flags(
             raise ValueError("common_db_bench_flags must be a JSON object")
         merged.update(user_common)
     merged["statistics"] = "true"
+    merged["show_table_properties"] = "true"
+    merged["stats_per_interval"] = "true"
+    merged.setdefault("stats_interval", "1")
 
     cli_flags = [f"--{key}={_to_cli_value(value)}" for key, value in sorted(merged.items())]
     return cli_flags + candidate_flags
@@ -351,6 +375,53 @@ def _maybe_build_options_file(
     return out_path
 
 
+def _force_evolve_dummy_filter_policy(
+    runtime_config: dict[str, Any], candidate_config: dict[str, Any]
+) -> None:
+    """
+    Force the table filter policy to rocksdb.EvolveDummyFilter for evaluation.
+
+    This mutates candidate_config in-place by injecting options_overrides entries
+    for all block-based table sections found in base_options_file.
+    """
+    if "base_options_file" not in runtime_config:
+        logger.warning(
+            "base_options_file is not set; cannot force filter_policy=rocksdb.EvolveDummyFilter"
+        )
+        return
+
+    base_options = _resolve_path(runtime_config, "base_options_file")
+    block_sections = _find_block_based_table_sections(base_options)
+    if not block_sections:
+        block_sections = ['[TableOptions/BlockBasedTable "default"]']
+
+    existing_overrides = candidate_config.get("options_overrides", {})
+    if existing_overrides is None:
+        existing_overrides = {}
+    if not isinstance(existing_overrides, dict):
+        raise ValueError("options_overrides must be a JSON object")
+
+    for section in block_sections:
+        section_overrides = existing_overrides.get(section, {})
+        if section_overrides is None:
+            section_overrides = {}
+        if not isinstance(section_overrides, dict):
+            raise ValueError(f"options_overrides[{section}] must be a JSON object")
+        section_overrides["filter_policy"] = "rocksdb.EvolveDummyFilter"
+        existing_overrides[section] = section_overrides
+
+    candidate_config["options_overrides"] = existing_overrides
+
+
+def _find_block_based_table_sections(path: Path) -> list[str]:
+    sections: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("[TableOptions/BlockBasedTable") and line.endswith("]"):
+            sections.append(line)
+    return sections
+
+
 def _ini_to_argv(values: dict[str, str]) -> list[str]:
     return [f"--{key}={value}" for key, value in sorted(values.items())]
 
@@ -383,7 +454,9 @@ def _argv_line(argv: list[str]) -> str:
     return " ".join(argv) + "\n\n"
 
 
-def _error_result(status: str, message: str, extra_artifacts: dict[str, str] | None = None) -> EvaluationResult:
+def _error_result(
+    status: str, message: str, extra_artifacts: dict[str, str] | None = None
+) -> EvaluationResult:
     logger.warning(
         "Returning error result status=%s combined_score=0.0 extra=%s",
         status,
@@ -462,3 +535,4 @@ def _cleanup_db_dir_if_requested(runtime_config: dict[str, Any], db_dir: Path) -
         logger.info("Removed database directory %s (cleanup_db_dir=true)", db_dir)
     else:
         logger.info("Leaving database directory %s in place (cleanup_db_dir=false)", db_dir)
+

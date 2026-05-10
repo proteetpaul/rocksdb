@@ -5037,6 +5037,14 @@ class Benchmark {
     auto table_options =
         options.table_factory->GetOptions<BlockBasedTableOptions>();
     if (table_options != nullptr) {
+      if (table_options->filter_policy != nullptr &&
+          table_options->filter_policy->IsInstanceOf(
+              "rocksdb.EvolveDummyFilter")) {
+        // Rebind evolve dummy policy with shared DB statistics so its
+        // ComputeBitsPerKey() logic can read live ticker values.
+        table_options->filter_policy.reset(
+            NewEvolveDummyFilterPolicy(options.statistics));
+      }
       if (FLAGS_cache_size > 0) {
         // This violates this function's rules on when to set options. But we
         // have to do it because the case of unconfigured block cache in OPTIONS

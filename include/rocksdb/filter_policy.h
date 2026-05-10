@@ -35,6 +35,7 @@
 namespace ROCKSDB_NAMESPACE {
 
 class Slice;
+class Statistics;
 struct BlockBasedTableOptions;
 struct ConfigOptions;
 
@@ -165,6 +166,17 @@ class FilterPolicy : public Customizable {
 // trailing spaces in keys.
 const FilterPolicy* NewBloomFilterPolicy(
     double bits_per_key, bool IGNORED_use_block_based_builder = false);
+
+// Return a dummy evolvable Bloom-like policy.
+//
+// This policy preserves Bloom filter construction/read mechanics while
+// choosing bits-per-key dynamically at filter build time using:
+// - FilterBuildingContext (e.g., level_at_creation/is_bottommost),
+// - observed Bloom-related statistics.
+//
+// This is intended for experimentation with learned/evolved filter tuning.
+const FilterPolicy* NewEvolveDummyFilterPolicy(
+    std::shared_ptr<Statistics> statistics);
 
 // A new Bloom alternative that saves about 30% space compared to
 // Bloom filters, with similar query times but roughly 3-4x CPU time

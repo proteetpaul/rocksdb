@@ -735,6 +735,9 @@ enum Histograms : uint32_t {
   // blocks for uniform key distribution tracking.
   BLOCK_KEY_DISTRIBUTION_CV,
 
+  // Time spent computing dynamic bits-per-key in EvolveDummyFilterPolicy.
+  COMPUTE_BITS_PER_KEY_MICROS,
+
   HISTOGRAM_ENUM_MAX
 };
 
