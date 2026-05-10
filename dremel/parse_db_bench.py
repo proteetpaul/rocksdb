@@ -68,6 +68,11 @@ def parse_read_write_histograms(text: str) -> tuple[tuple[float, float] | None, 
 
 
 def parse_db_bench_output(text: str) -> DbBenchMetrics:
+    # Parses the entire `text` as one blob: no load vs workload phase boundary.
+    # Read histograms use the first "Microseconds per read" block; write uses the
+    # last "Microseconds per write" match. Throughput uses the first
+    # readrandomwriterandom summary line. If load and run output are concatenated,
+    # metrics may mix phases unless earlier phases omit these patterns.
     read_pair, write_pair = parse_read_write_histograms(text)
     return DbBenchMetrics(
         throughput_qps=parse_throughput_readrandomwriterandom(text),
