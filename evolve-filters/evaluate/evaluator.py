@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import os
@@ -10,15 +9,28 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 EVOLVE_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-for candidate_root in (WORKSPACE_ROOT, EVOLVE_ROOT):
-    if str(candidate_root) not in sys.path:
-        sys.path.insert(0, str(candidate_root))
+_OPENVOLVE_PKG_ROOT = EVOLVE_ROOT / "openevolve"
+
+
+def _prepend_sys_path(path: Path) -> None:
+    s = str(path.resolve())
+    if s in sys.path:
+        sys.path.remove(s)
+    sys.path.insert(0, s)
+
+
+# OpenEvolve loads this file with importlib as "evaluation_module" and prepends evaluate/
+# first. That can make `import openevolve` hit a different install than the running framework
+# (two EvaluationResult classes → isinstance fails in openevolve.evaluator).
+# Prepend in order so path[0] is the vendored OpenEvolve project root (parent of the
+# `openevolve` package), then evolve-filters, then RocksDB workspace.
+for _root in (WORKSPACE_ROOT, EVOLVE_ROOT, _OPENVOLVE_PKG_ROOT):
+    _prepend_sys_path(_root)
 
 from dremel.options_file import write_options_file
 from dremel.parse_db_bench import parse_db_bench_output
@@ -27,59 +39,30 @@ from evaluate.parse_stats import parse_bloom_statistics, parse_live_sst_filter_b
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class EvaluationResult:
-    metrics: dict[str, float]
-    artifacts: dict[str, str] = field(default_factory=dict)
-
-
-def _load_openevolve_evaluation_result() -> type[EvaluationResult]:
-    module_path = EVOLVE_ROOT / "openevolve" / "openevolve" / "evaluation_result.py"
-    if not module_path.is_file():
-        logger.warning(
-            "OpenEvolve EvaluationResult module not found at %s; using local fallback.",
-            module_path,
-        )
-        return EvaluationResult
-
-    spec = importlib.util.spec_from_file_location(
-        "openevolve_evaluation_result_local",
-        str(module_path),
-    )
-    if spec is None or spec.loader is None:
-        logger.warning(
-            "Could not create import spec for OpenEvolve EvaluationResult at %s; using local fallback.",
-            module_path,
-        )
-        return EvaluationResult
-
-    try:
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    except Exception:  # pylint: disable=broad-except
-        logger.warning(
-            "Failed to load OpenEvolve EvaluationResult from %s; using local fallback.",
-            module_path,
-            exc_info=True,
-        )
-        return EvaluationResult
-
-    loaded_cls = getattr(module, "EvaluationResult", None)
-    if isinstance(loaded_cls, type):
-        logger.info("Loaded OpenEvolve EvaluationResult from %s", module_path)
-        return loaded_cls
-    logger.warning(
-        "Module at %s has no usable EvaluationResult class; using local fallback.",
-        module_path,
-    )
-    return EvaluationResult
-
-
-EvaluationResult = _load_openevolve_evaluation_result()
+try:
+    from openevolve.evaluation_result import EvaluationResult
+except ImportError as exc:
+    raise ImportError(
+        "openevolve.evaluation_result is required for this evaluator (same class OpenEvolve "
+        "uses for isinstance checks). Ensure the vendored openevolve package is on PYTHONPATH."
+    ) from exc
 
 # Evolved C++ is installed here relative to the CMake workspace root (see _cmake_workspace_root()).
 _FILTER_POLICY_CC_RELATIVE = Path("table/block_based/filter_policy.cc")
+
+
+def _failure_metrics(**overrides: float) -> dict[str, float]:
+    """Same keys as the success path so MAP-Elites feature_dimensions always resolve."""
+    metrics: dict[str, float] = {
+        "combined_score": 0.0,
+        "rocksdb_build_success": 0.0,
+        "throughput_qps": 0.0,
+        "read_p99_us": 0.0,
+        "write_p99_us": 0.0,
+        "filter_memory_usage": 0.0,
+    }
+    metrics.update(overrides)
+    return metrics
 
 
 def _cmake_workspace_root() -> Path:
@@ -218,9 +201,9 @@ def evaluate(program_path: str) -> EvaluationResult:
     under the CMake workspace (``WORKSPACE`` / ``WORKSPACE_ROOT`` or the repo root). That file is
     written before CMake builds RocksDB.
 
-    Fixed bench/db_bench/options JSON is loaded from ``OPENEVOLVE_EVAL_CONFIG`` **after** a
-    successful CMake build (merge former per-candidate ``db_bench_flags`` / ``options_overrides``
-    into that JSON).
+    Fixed bench/db_bench/options JSON is loaded from ``OPENEVOLVE_EVAL_CONFIG`` if set, else
+    from ``<evolve-filters>/eval_config.json`` when present, **after** a successful CMake build
+    (merge per-candidate ``db_bench_flags`` / ``options_overrides`` into that JSON).
     """
     logger.info("evaluate() starting program_path=%s", program_path)
     try:
@@ -234,7 +217,7 @@ def evaluate(program_path: str) -> EvaluationResult:
             merged.update(install_artifacts)
             logger.warning("Evolved filter_policy.cc install failed: %s", msg)
             return EvaluationResult(
-                metrics={"combined_score": 0.0},
+                metrics=_failure_metrics(),
                 artifacts=merged,
             )
 
@@ -245,11 +228,11 @@ def evaluate(program_path: str) -> EvaluationResult:
             merged.update(build_artifacts)
             logger.warning("RocksDB CMake build failed: %s", msg)
             return EvaluationResult(
-                metrics={"combined_score": 0.0, "rocksdb_build_success": 0.0},
+                metrics=_failure_metrics(),
                 artifacts=merged,
             )
 
-        runtime_config_path = _required_env_path("OPENEVOLVE_EVAL_CONFIG")
+        runtime_config_path = _openevolve_eval_config_path()
         eval_config = _load_json(runtime_config_path)
         _force_evolve_dummy_filter_policy(eval_config)
         evolved_resolved = Path(program_path).expanduser().resolve()
@@ -293,43 +276,57 @@ def evaluate(program_path: str) -> EvaluationResult:
             common_flags.append(f"--options_file={options_file_path}")
             logger.info("Using patched options file %s", options_file_path)
 
+        load_common_flags = _with_flag_overrides(
+            common_flags, {"statistics": "false", "report_interval_seconds": "0", "stats_interval": "0"}
+        )
+        logger.info("Load flags: %s", load_common_flags)
+   
+        workload_common_flags = _with_flag_overrides(
+            common_flags, {"statistics": "true", "report_interval_seconds": "0", "stats_interval": "0"}
+        )
+        logger.info("Workload flags: %s", workload_common_flags)
+
         load_flags = _ini_to_argv(load_values)
         workload_flags = _ini_to_argv(workload_values)
 
-        full_log: list[str] = []
         try:
             _recreate_dir(db_dir)
             logger.info("Recreated database directory %s", db_dir)
 
             load_argv = _scoped_argv(
-                db_bench, common_flags + load_flags, memory_limit_bytes
+                db_bench,
+                load_common_flags + load_flags,
+                memory_limit_bytes,
             )
-            full_log.append(_argv_line(load_argv))
             logger.info("Starting db_bench load phase (MemoryMax=%s)", memory_limit_bytes)
             load_result = _run(load_argv, timeout_sec=timeout_sec)
-            full_log.append(load_result.stdout or "")
             if load_result.returncode != 0:
                 logger.warning(
                     "Load phase failed returncode=%s db_bench=%s",
                     load_result.returncode,
                     db_bench,
                 )
+                logger.warning(
+                    "Load phase output:\n%s",
+                    (load_result.stdout or "").rstrip(),
+                )
                 return _error_result(
                     "load_failed",
-                    "".join(full_log),
+                    load_result.stdout,
                     extra_artifacts={"load_return_code": str(load_result.returncode)},
                 )
             logger.info("Load phase completed successfully")
 
             run_argv = _scoped_argv(
-                db_bench, common_flags + workload_flags, memory_limit_bytes
+                db_bench,
+                workload_common_flags + workload_flags,
+                memory_limit_bytes,
             )
-            full_log.append("\n" + _argv_line(run_argv))
             logger.info(
                 "Starting db_bench workload phase (MemoryMax=%s)", memory_limit_bytes
             )
             run_result = _run(run_argv, timeout_sec=timeout_sec)
-            full_log.append(run_result.stdout or "")
+            output_text = run_result.stdout
             if run_result.returncode != 0:
                 logger.warning(
                     "Workload phase failed returncode=%s db_bench=%s",
@@ -338,15 +335,19 @@ def evaluate(program_path: str) -> EvaluationResult:
                 )
                 return _error_result(
                     "run_failed",
-                    "".join(full_log),
+                    output_text,
                     extra_artifacts={"run_return_code": str(run_result.returncode)},
                 )
             logger.info("Workload phase completed successfully")
-
-            output_text = "".join(full_log)
+            logger.info(f"Size of output: %s", len(output_text))
+            
+            logger.info("Workload phase completed successfully (1)")
             perf_metrics = parse_db_bench_output(output_text)
+            logger.info("Workload phase completed successfully (2)")
             bloom_stats = parse_bloom_statistics(output_text)
+            logger.info("Workload phase completed successfully (3)")
             live_sst_filter_bytes = parse_live_sst_filter_bytes(output_text)
+            logger.info("Workload phase completed successfully (4)")
 
             throughput = perf_metrics.throughput_qps or 0.0
             read_p99 = perf_metrics.read_p99_us or 0.0
@@ -400,6 +401,20 @@ def evaluate(program_path: str) -> EvaluationResult:
     except Exception as exc:  # pylint: disable=broad-except
         logger.warning("Evaluation failed: %s", exc, exc_info=True)
         return _error_result("error", str(exc))
+
+
+def _openevolve_eval_config_path() -> Path:
+    """JSON runtime config for db_bench phases; env overrides default file."""
+    raw = os.environ.get("OPENEVOLVE_EVAL_CONFIG", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    default_path = (EVOLVE_ROOT / "eval_config.json").resolve()
+    if default_path.is_file():
+        return default_path
+    raise ValueError(
+        "OPENEVOLVE_EVAL_CONFIG must be set, or place eval_config.json under "
+        f"{EVOLVE_ROOT}"
+    )
 
 
 def _required_env_path(var_name: str) -> Path:
@@ -478,21 +493,26 @@ def _common_db_bench_flags(
         merged.update(overrides)
 
     merged.pop("db", None)
+    # Some db_bench builds do not define report_dir; keep evaluator portable.
+    merged.pop("report_dir", None)
     merged["db"] = str(db_dir)
     merged["statistics"] = "true"
     merged["show_table_properties"] = "true"
-    merged["stats_per_interval"] = "true"
-    merged.setdefault("stats_interval", "1")
+    # db_bench defines this as int32 (0/1), not bool.
+    # merged["stats_per_interval"] = "1"
+    # merged.setdefault("stats_interval", "1")
 
     user_common = eval_config.get("common_db_bench_flags", {})
     if user_common is not None:
         if not isinstance(user_common, dict):
             raise ValueError("common_db_bench_flags must be a JSON object")
         merged.update(user_common)
+    merged.pop("report_dir", None)
     merged["statistics"] = "true"
     merged["show_table_properties"] = "true"
-    merged["stats_per_interval"] = "true"
-    merged.setdefault("stats_interval", "1")
+    # merged["stats_per_interval"] = "1"
+    # merged.setdefault("stats_interval", "1")
+    merged["report_interval_seconds"] = "0"
 
     cli_flags = [f"--{key}={_to_cli_value(value)}" for key, value in sorted(merged.items())]
     return cli_flags + extra_db_bench_flags
@@ -585,6 +605,26 @@ def _ini_to_argv(values: dict[str, str]) -> list[str]:
     return [f"--{key}={value}" for key, value in sorted(values.items())]
 
 
+def _with_flag_overrides(flags: list[str], overrides: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for flag in flags:
+        if not flag.startswith("--") or "=" not in flag:
+            out.append(flag)
+            continue
+        key, _, value = flag[2:].partition("=")
+        if key in overrides:
+            out.append(f"--{key}={overrides[key]}")
+            seen.add(key)
+        else:
+            out.append(f"--{key}={value}")
+
+    for key, value in overrides.items():
+        if key not in seen:
+            out.append(f"--{key}={value}")
+    return out
+
+
 def _scoped_argv(db_bench: Path, db_bench_flags: list[str], memory_limit_bytes: int) -> list[str]:
     return [
         "systemd-run",
@@ -624,7 +664,7 @@ def _error_result(
     artifacts: dict[str, str] = {"status": status, "error": message}
     if extra_artifacts:
         artifacts.update(extra_artifacts)
-    return EvaluationResult(metrics={"combined_score": 0.0}, artifacts=artifacts)
+    return EvaluationResult(metrics=_failure_metrics(), artifacts=artifacts)
 
 
 def _required_str(config: dict[str, Any], key: str) -> str:

@@ -8,6 +8,7 @@ Each ``db_bench`` runs under ``systemd-run --user --scope`` with cgroup ``Memory
 from __future__ import annotations
 
 import csv
+import json
 import os
 import shutil
 import subprocess
@@ -233,6 +234,7 @@ def run_all_samples(
             "write_p50_us",
             "write_p99_us",
             "throughput_qps",
+            "rocksdb_statistics_json",
             "db_disk_du_sh",
             "status",
             "log_path",
@@ -269,6 +271,9 @@ def run_all_samples(
                 "write_p50_us": "" if m is None or m.write_p50_us is None else m.write_p50_us,
                 "write_p99_us": "" if m is None or m.write_p99_us is None else m.write_p99_us,
                 "throughput_qps": "" if m is None or m.throughput_qps is None else m.throughput_qps,
+                "rocksdb_statistics_json": (
+                    "" if m is None else json.dumps(m.statistics, sort_keys=True, separators=(",", ":"))
+                ),
                 "db_disk_du_sh": du_s or "",
                 "status": status,
             }
@@ -299,6 +304,9 @@ def run_all_samples(
                 f"--key_size={key_size}",
                 f"--value_size={value_size}",
                 f"--compression_type={compression_type}",
+                "--stats_interval=0",
+                "--stats_interval_seconds=0",
+                "--stats_per_interval=0",
             ]
             if statistics.lower() == "true":
                 common_flags.append("--statistics=true")

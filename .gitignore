@@ -30,6 +30,8 @@ rocksdb.pc
 CMakeCache.txt
 CMakeFiles/
 build/
+bench/LHS/logs/
+evolve-filters/openevolve_output/logs/
 
 ldb
 manifest_dump

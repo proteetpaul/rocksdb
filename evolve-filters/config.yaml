@@ -1,5 +1,6 @@
 checkpoint_interval: 10
 max_iterations: 200
+log_level: DEBUG    # To show prompts and responses in logs
 
 database:
   in_memory: false
@@ -16,10 +17,10 @@ diff_based_evolution: true
 llm:
   api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
   primary_model: "gemini-3-flash-preview"
-  primary_model_weight: 0.8
-  secondary_model: "gemini-3.1-pro-preview"
-  secondary_model_weight: 0.2
-  temperature: 0.7
+  primary_model_weight: 1
+  # secondary_model: "gemini-3.1-pro-preview"
+  # secondary_model_weight: 0.2
+  # temperature: 0.7
   system_message: |-
     You are evolving RocksDB Bloom filter policy logic inside the EVOLVE block in `table/block_based/filter_policy.cc`, specifically `ComputeBitsPerKey(const FilterBuildingContext&)`.
 
@@ -149,8 +150,9 @@ llm:
 
 evaluator:
   enable_artifacts: true      # Error feedback to LLM
-  cascade_evaluation: true    # Multi-stage testing
+  cascade_evaluation: false
   use_llm_feedback: true      # AI code quality assessment
+  timeout: 1200
 
 prompt:
   num_top_programs: 3         # Best performers

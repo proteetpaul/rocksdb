@@ -1,0 +1,8 @@
+{
+  "memory_limit": "3G",
+  "bench_ini": "bench/bench.ini",
+  "load_ini": "bench/workloads/load.ini",
+  "workload_ini": "bench/workloads/workload_a.ini",
+  "base_options_file": "bench/rocksdb_options.ini",
+  "cleanup_db_dir": true
+}
