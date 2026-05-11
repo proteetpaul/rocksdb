@@ -352,34 +352,31 @@ def evaluate(program_path: str) -> EvaluationResult:
             read_p99 = perf_metrics.read_p99_us or 0.0
             write_p99 = perf_metrics.write_p99_us or 0.0
 
-            observed_fp_rate = bloom_stats.get("bloom.full.observed_fp_rate", 0.0)
-            latency_factor = 1.0 / (1.0 + (read_p99 / 1000.0))
-            fp_factor = max(0.0, 1.0 - observed_fp_rate)
-            memory_factor = 1.0 / (1.0 + (live_sst_filter_bytes / (64.0 * 1024 * 1024)))
-            combined_score = throughput * latency_factor * fp_factor * memory_factor
+            # observed_fp_rate = bloom_stats.get("bloom.full.observed_fp_rate", 0.0)
+            # read_latency_factor = 1.0 / (1.0 + (read_p99 / 1000.0))
+            # write_latency_factor = 1.0 / (1.0 + (write_p99 / 1000.0))
+            # latency_factor = (read_latency_factor + write_latency_factor) / 2.0
+
+            # fp_factor = max(0.0, 1.0 - observed_fp_rate)
+            # memory_factor = 1.0 / (1.0 + (live_sst_filter_bytes / (64.0 * 1024 * 1024)))
+            # combined_score = throughput * memory_factor
 
             metrics: dict[str, float] = {
-                "combined_score": combined_score,
+                "combined_score": throughput,
                 "rocksdb_build_success": 1.0,
                 "throughput_qps": throughput,
                 "read_p99_us": read_p99,
                 "write_p99_us": write_p99,
-                "read_p50_us": perf_metrics.read_p50_us or 0.0,
-                "write_p50_us": perf_metrics.write_p50_us or 0.0,
-                "live_sst_filter_bytes": live_sst_filter_bytes,
-                "score.latency_factor": latency_factor,
-                "score.fp_factor": fp_factor,
-                "score.memory_factor": memory_factor,
+                "filter_memory_usage": live_sst_filter_bytes,
             }
             metrics.update(bloom_stats)
 
             logger.info(
-                "Evaluation ok throughput_qps=%s read_p99_us=%s bloom_stat_keys=%s filter_bytes=%s combined_score=%s",
+                "Evaluation ok throughput_qps=%s read_p99_us=%s bloom_stat_keys=%s filter_bytes=%s",
                 perf_metrics.throughput_qps,
                 perf_metrics.read_p99_us,
                 len(bloom_stats),
                 live_sst_filter_bytes,
-                combined_score,
             )
             return EvaluationResult(
                 metrics=metrics,
