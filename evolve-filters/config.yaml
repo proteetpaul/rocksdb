@@ -1,0 +1,172 @@
+checkpoint_interval: 10
+max_iterations: 200
+
+database:
+  in_memory: false
+  log_prompts: true
+  archive_size: 150
+  elite_selection_ratio: 0.2
+  exploitation_ratio: 0.7
+  num_islands: 3
+  population_size: 50
+  similarity_threshold: 0.99
+
+diff_based_evolution: true
+
+llm:
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  primary_model: "gemini-3-flash-preview"
+  primary_model_weight: 0.8
+  secondary_model: "gemini-3.1-pro-preview"
+  secondary_model_weight: 0.2
+  temperature: 0.7
+  system_message: |-
+    You are evolving RocksDB Bloom filter policy logic inside the EVOLVE block in `table/block_based/filter_policy.cc`, specifically `ComputeBitsPerKey(const FilterBuildingContext&)`.
+
+    Motivation
+    - Default RocksDB filter policies are mostly static.
+    - Craft a dynamic policy that chooses bits-per-key using contextual information and observed workload behavior.
+
+    Goal
+    - Generate a diverse set of valid candidate policies.
+    - Balance Bloom lookup performance and filter memory usage.
+    - Avoid collapsing too early to one narrow strategy.
+
+    Inspiration
+    - Use different bits-per-key for different levels (for example, top levels vs bottommost levels).
+    - Adapt based on bloom effectiveness and query-type mix.
+
+    Rules
+    - Keep the function deterministic and fast.
+    - Keep logic constant-time with respect to data size (no loops over data, no data-dependent scans).
+    - Do not take locks or introduce synchronization in this function.
+    - Preserve memory safety: no unsafe ownership patterns; rely on existing smart-pointer based ownership.
+    - Guard all divisions/logs against invalid ranges (division by zero, log of non-positive values, NaN/Inf propagation).
+    - Keep output within `ClampBitsPerKey()` bounds.
+    - Keep changes localized to the evolve block unless absolutely required for compilation.
+
+    Information available
+    - Relevant Statistics fields and suggested usage:
+      - `BLOOM_FILTER_USEFUL`: negatives avoided by filter; higher often means filter is effective.
+      - `BLOOM_FILTER_FULL_POSITIVE`: filter positives (includes true + false positives).
+      - `BLOOM_FILTER_FULL_TRUE_POSITIVE`: positives where key was truly present.
+      - `BLOOM_FILTER_PREFIX_CHECKED`: number of prefix filter checks.
+      - `BLOOM_FILTER_PREFIX_USEFUL`: prefix checks that avoided reads.
+      - `BLOOM_FILTER_PREFIX_TRUE_POSITIVE`: prefix checks that ended with true hit.
+      - `NUMBER_DB_SEEK`: seek-heavy workload indicator.
+      - `NUMBER_DB_NEXT`: forward-iteration pressure indicator.
+      - `NUMBER_DB_PREV`: reverse-iteration pressure indicator.
+      - `NUMBER_KEYS_READ`: overall read-intensity indicator.
+    - `FilterBuildingContext` definition:
+      struct FilterBuildingContext {
+        // This constructor is for internal use only and subject to change.
+        // Keeps a reference to table_options.
+        explicit FilterBuildingContext(const BlockBasedTableOptions& table_options);
+
+        // Options for the table being built
+        const BlockBasedTableOptions& table_options;
+
+        // BEGIN from (DB|ColumnFamily)Options in effect at table creation time
+        CompactionStyle compaction_style = kCompactionStyleLevel;
+
+        // Number of LSM levels, or -1 if unknown
+        int num_levels = -1;
+
+        // An optional logger for reporting errors, warnings, etc.
+        Logger* info_log = nullptr;
+        // END from (DB|ColumnFamily)Options
+
+        // Name of the column family for the table (or empty string if unknown)
+        // TODO: consider changing to Slice
+        std::string column_family_name;
+
+        // The table level at time of constructing the SST file, or -1 if unknown
+        // or N/A as in SstFileWriter. (The table file could later be used at a
+        // different level.)
+        int level_at_creation = -1;
+
+        // True if known to be going into bottommost sorted run for applicable
+        // key range (which might not even be last level with data). False
+        // otherwise.
+        bool is_bottommost = false;
+
+        // Reason for creating the file with the filter
+        TableFileCreationReason reason = TableFileCreationReason::kMisc;
+      };
+
+    Baseline reference behavior
+    - Starts near 9.9 bits/key.
+    - Estimates observed full-filter FP behavior from bloom counters.
+    - Converts FP estimate into bits/key using `bits ~= -ln(fp) / (ln(2)^2)`.
+    - Returns clamped result.
+  evaluator_message: |-
+    Evaluate candidate changes to the EVOLVE block (`ComputeBitsPerKey`) using the returned metrics and artifacts below.
+
+    Decision policy
+    - Prioritize higher `combined_score`.
+    - In this evaluator implementation, `combined_score` is currently set to `throughput_qps` in the returned metrics, so treat throughput as the primary objective signal.
+    - Prefer lower `read_p99_us`, lower `write_p99_us`, and lower `filter_memory_usage` when throughput is comparable.
+    - Prefer lower `bloom.full.observed_fp_rate` and lower `bloom.full.false_positive.count`.
+    - Prefer lower `rocksdb.compute.bits.per.key.micros.*` values (especially p50/p95/p99) to keep policy computation overhead small.
+    - Preserve diversity: when scores are close, keep behaviorally different policies (for example, different level-aware strategies).
+
+    Hard rules (must hold)
+    - Keep logic deterministic and constant-time with respect to data size.
+    - Do not add locks/synchronization in `ComputeBitsPerKey`.
+    - Preserve memory safety and ownership expectations (no unsafe raw-pointer lifetime patterns).
+    - Guard numeric operations (division/log bounds, NaN/Inf handling).
+    - Keep output in `ClampBitsPerKey()` bounds.
+    - Do not break compilation or broaden changes beyond the evolve block unless required to build.
+
+    Returned feature dimensions / key metrics
+    - `throughput_qps`: db_bench throughput (higher is better).
+    - `read_p99_us`: point-read tail latency in microseconds (lower is better).
+    - `write_p99_us`: write tail latency in microseconds (lower is better).
+    - `filter_memory_usage`: estimated live SST filter bytes parsed from table properties (lower is better).
+    - `rocksdb_build_success`: 1.0 on successful build+run, 0.0 when build fails.
+    - Bloom stats from `parse_bloom_statistics`:
+      - any `rocksdb.bloom.filter.*` parsed counters/histogram fields
+      - `bloom.full.false_positive.count`
+      - `bloom.full.observed_fp_rate`
+      - `rocksdb.compute.bits.per.key.micros.*` timing fields when present (time spent inside `ComputeBitsPerKey`)
+
+    Returned artifacts (how to interpret)
+    - Success (`status=ok`):
+      - includes runtime metadata and full benchmark log:
+        `runtime_config_path`, `evolved_source_path`, `memory_limit`,
+        `db_bench_path`, `db_dir`, `log`
+    - Build/install failures:
+      - `status=evolved_source_install_failed` with install context
+      - `status=rocksdb_cmake_failed` with detailed CMake/build fields such as:
+        `error_type`, `error_message`, `build_directory`,
+        and possibly `cmake_stdout`, `cmake_stderr`, `build_stdout`, `build_stderr`
+    - Runtime execution failures:
+      - `status=load_failed` and `load_return_code`
+      - `status=run_failed` and `run_return_code`
+      - `status=timeout`
+      - `status=error`
+    - Any non-`ok` status returns `combined_score=0.0` and should be treated as invalid for selection.
+
+evaluator:
+  enable_artifacts: true      # Error feedback to LLM
+  cascade_evaluation: true    # Multi-stage testing
+  use_llm_feedback: true      # AI code quality assessment
+
+prompt:
+  num_top_programs: 3         # Best performers
+  num_diverse_programs: 2     # Creative exploration
+  include_artifacts: true     # Execution feedback
+
+database:
+  feature_dimensions:
+    - read_p99_us
+    - throughput_qps
+    - write_p99_us
+    - filter_memory_usage
+  
+  feature_bins:
+    read_p99_us: 5
+    write_p99_us: 5
+    throughput_qps: 5
+    filter_memory_usage: 5
+

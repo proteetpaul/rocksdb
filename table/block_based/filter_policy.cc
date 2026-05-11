@@ -1865,36 +1865,6 @@ class EvolveDummyFilterPolicy : public FilterPolicy {
   }
 
   // EVOLVE-BLOCK-START
-  /**
-   * Baseline implementation:
-   * - Start from 9.9 bits/key (about 1% Bloom FP rate).
-   * - Read bloom stats from Statistics:
-   *     BLOOM_FILTER_USEFUL, BLOOM_FILTER_FULL_POSITIVE,
-   *     BLOOM_FILTER_FULL_TRUE_POSITIVE.
-   * - Estimate observed full-filter false-positive rate as
-   *     (positive - true_positive) / ((positive - true_positive) + useful),
-   *   then convert that FP estimate back to bits/key using
-   *     bits ~= -ln(fp) / (ln(2)^2).
-   * - Clamp to safe bounds with ClampBitsPerKey().
-   *
-   * OpenEvolve hints:
-   * - Try to find a policy that determines a suitable bits-per-key based on
-   *   FilterBuildingContext fields (e.g., level_at_creation, is_bottommost,
-   *   reason), Bloom lookup statistics (e.g., BLOOM_FILTER_USEFUL,
-   *   BLOOM_FILTER_FULL_POSITIVE, BLOOM_FILTER_FULL_TRUE_POSITIVE), and
-   *   query-type mix indicators (e.g., NUMBER_MULTIGET_CALLS,
-   *   NUMBER_DB_SEEK, NUMBER_DB_NEXT, NUMBER_DB_PREV, NUMBER_KEYS_READ).
-   * - Keep the function deterministic and fast (hot path for file creation).
-   * - Prefer smooth, monotonic adjustments over abrupt thresholds.
-   * - Use FilterBuildingContext fields (e.g., level_at_creation,
-   *   is_bottommost, reason) to specialize bits/key by table placement.
-   * - Optimize for evaluator objective: higher throughput, lower read_p99_us,
-   *   and lower memory footprint of filters
-   * 
-   * Safety rules:
-   * - Guard all divisions and logs; preserve NaN/inf safety.
-   * - Keep final output within ClampBitsPerKey() bounds.
-   */
   double ComputeBitsPerKey(const FilterBuildingContext& context) const {
     const auto start = std::chrono::steady_clock::now();
     double stats_based_bits = 9.9;
