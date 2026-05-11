@@ -11,14 +11,12 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <climits>
 #include <cstring>
 #include <deque>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 
 #include "cache/cache_reservation_manager.h"
@@ -31,6 +29,7 @@
 #include "rocksdb/utilities/object_registry.h"
 #include "rocksdb/utilities/options_type.h"
 #include "table/block_based/block_based_table_reader.h"
+#include "table/block_based/evolve_filter_policy.h"
 #include "table/block_based/filter_policy_internal.h"
 #include "table/block_based/full_filter_block.h"
 #include "util/atomic.h"
@@ -1822,119 +1821,11 @@ BuiltinFilterBitsReader* BuiltinFilterPolicy::GetBloomBitsReader(
   return new AlwaysTrueFilter();
 }
 
-class EvolveDummyFilterPolicy : public FilterPolicy {
- public:
-  explicit EvolveDummyFilterPolicy(std::shared_ptr<Statistics> statistics)
-      : statistics_(std::move(statistics)),
-        reader_delegate_(NewBloomFilterPolicy(/*bits_per_key=*/10.0)) {}
-
-  const char* Name() const override { return kClassName(); }
-  static const char* kClassName() { return "rocksdb.EvolveDummyFilter"; }
-
-  const char* CompatibilityName() const override {
-    return reader_delegate_->CompatibilityName();
-  }
-
-  FilterBitsBuilder* GetBuilderWithContext(
-      const FilterBuildingContext& context) const override {
-    double dynamic_bpk = ComputeBitsPerKey(context);
-    const FilterPolicy* delegate = GetOrCreateDelegate(dynamic_bpk);
-    return delegate->GetBuilderWithContext(context);
-  }
-
-  FilterBitsReader* GetFilterBitsReader(const Slice& contents) const override {
-    return reader_delegate_->GetFilterBitsReader(contents);
-  }
-
- private:
-  static double ClampBitsPerKey(double bits_per_key) {
-    if (!std::isfinite(bits_per_key)) {
-      return 9.9;
-    }
-    if (bits_per_key < 0.5) {
-      return 0.5;
-    }
-    if (bits_per_key > 30.0) {
-      return 30.0;
-    }
-    return bits_per_key;
-  }
-
-  static int64_t ToMillibits(double bits_per_key) {
-    return static_cast<int64_t>(std::llround(bits_per_key * 1000.0));
-  }
-
-  // EVOLVE-BLOCK-START
-  double ComputeBitsPerKey(const FilterBuildingContext& context) const {
-    const auto start = std::chrono::steady_clock::now();
-    double stats_based_bits = 9.9;
-
-    if (statistics_ != nullptr) {
-      const double useful = static_cast<double>(
-          statistics_->getTickerCount(BLOOM_FILTER_USEFUL));
-      const double positive = static_cast<double>(
-          statistics_->getTickerCount(BLOOM_FILTER_FULL_POSITIVE));
-      const double true_positive = static_cast<double>(
-          statistics_->getTickerCount(BLOOM_FILTER_FULL_TRUE_POSITIVE));
-
-      const double false_positive = std::max(0.0, positive - true_positive);
-      const double negative_queries = useful + false_positive;
-      if (negative_queries > 0.0) {
-        // Estimate bits/key from observed full-filter FP rate:
-        // fp ~= exp(-bits * ln(2)^2) => bits ~= -ln(fp)/ln(2)^2.
-        const double observed_fp = false_positive / negative_queries;
-        const double bounded_fp = std::min(0.99, std::max(1e-9, observed_fp));
-        const double ln2 = std::log(2.0);
-        stats_based_bits = -std::log(bounded_fp) / (ln2 * ln2);
-      }
-    }
-
-    const double clamped = ClampBitsPerKey(stats_based_bits);
-    if (statistics_ != nullptr) {
-      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now() - start);
-      statistics_->reportTimeToHistogram(
-          COMPUTE_BITS_PER_KEY_MICROS,
-          static_cast<uint64_t>(std::max<int64_t>(0, elapsed.count())));
-    }
-    return clamped;
-  }
-  // EVOLVE-BLOCK-END
-
-  const FilterPolicy* GetOrCreateDelegate(double bits_per_key) const {
-    const double clamped = ClampBitsPerKey(bits_per_key);
-    const int64_t millibits = ToMillibits(clamped);
-
-    std::lock_guard<std::mutex> lock(delegate_mu_);
-    auto it = delegate_by_millibits_.find(millibits);
-    if (it != delegate_by_millibits_.end()) {
-      return it->second.get();
-    }
-
-    std::unique_ptr<const FilterPolicy> created(NewBloomFilterPolicy(clamped));
-    const FilterPolicy* raw = created.get();
-    delegate_by_millibits_.emplace(millibits, std::move(created));
-    return raw;
-  }
-
-  std::shared_ptr<Statistics> statistics_;
-  std::unique_ptr<const FilterPolicy> reader_delegate_;
-
-  mutable std::mutex delegate_mu_;
-  mutable std::unordered_map<int64_t, std::unique_ptr<const FilterPolicy>>
-      delegate_by_millibits_;
-};
-
 const FilterPolicy* NewBloomFilterPolicy(double bits_per_key,
                                          bool /*use_block_based_builder*/) {
   // NOTE: use_block_based_builder now ignored so block-based filter is no
   // longer accessible in public API.
   return new BloomFilterPolicy(bits_per_key);
-}
-
-const FilterPolicy* NewEvolveDummyFilterPolicy(
-    std::shared_ptr<Statistics> statistics) {
-  return new EvolveDummyFilterPolicy(std::move(statistics));
 }
 
 RibbonFilterPolicy::RibbonFilterPolicy(double bloom_equivalent_bits_per_key,

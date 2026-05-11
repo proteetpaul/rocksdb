@@ -48,7 +48,7 @@ except ImportError as exc:
     ) from exc
 
 # Evolved C++ is installed here relative to the CMake workspace root (see _cmake_workspace_root()).
-_FILTER_POLICY_CC_RELATIVE = Path("table/block_based/filter_policy.cc")
+_EVOLVE_FILTER_POLICY_CC_RELATIVE = Path("table/block_based/evolve_filter_policy.cc")
 
 
 def _failure_metrics(**overrides: float) -> dict[str, float]:
@@ -157,7 +157,7 @@ def _install_evolved_filter_policy_source(
     program_path: str, workspace: Path
 ) -> tuple[bool, dict[str, str]]:
     """
-    Copy LLM-produced C++ from program_path into workspace's filter_policy.cc.
+    Copy LLM-produced C++ from program_path into workspace's evolve_filter_policy.cc.
 
     Concurrent evaluations on the same workspace overwrite the same file; use
     isolated WORKSPACE checkouts or serialize evaluators.
@@ -179,7 +179,7 @@ def _install_evolved_filter_policy_source(
         artifacts["evolved_source_path"] = str(src)
         return False, artifacts
 
-    dest = workspace / _FILTER_POLICY_CC_RELATIVE
+    dest = workspace / _EVOLVE_FILTER_POLICY_CC_RELATIVE
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(body, encoding="utf-8")
@@ -197,7 +197,7 @@ def _install_evolved_filter_policy_source(
 def evaluate(program_path: str) -> EvaluationResult:
     """OpenEvolve-compatible evaluator entrypoint.
 
-    ``program_path`` must be a file whose contents replace ``table/block_based/filter_policy.cc``
+    ``program_path`` must be a file whose contents replace ``table/block_based/evolve_filter_policy.cc``
     under the CMake workspace (``WORKSPACE`` / ``WORKSPACE_ROOT`` or the repo root). That file is
     written before CMake builds RocksDB.
 
@@ -215,7 +215,7 @@ def evaluate(program_path: str) -> EvaluationResult:
             msg = install_artifacts.get("error_message", "Failed to install evolved source")
             merged: dict[str, str] = {"status": "evolved_source_install_failed", "error": msg}
             merged.update(install_artifacts)
-            logger.warning("Evolved filter_policy.cc install failed: %s", msg)
+            logger.warning("Evolved evolve_filter_policy.cc install failed: %s", msg)
             return EvaluationResult(
                 metrics=_failure_metrics(),
                 artifacts=merged,

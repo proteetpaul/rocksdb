@@ -22,7 +22,7 @@ llm:
   # secondary_model_weight: 0.2
   # temperature: 0.7
   system_message: |-
-    You are evolving RocksDB Bloom filter policy logic inside the EVOLVE block in `table/block_based/filter_policy.cc`, specifically `ComputeBitsPerKey(const FilterBuildingContext&)`.
+    You are an expert systems programmer who is well-versed in C++. You are evolving RocksDB Bloom filter policy logic inside the EVOLVE block in the given source code, specifically `ComputeBitsPerKey(const FilterBuildingContext&)`.
 
     Motivation
     - Default RocksDB filter policies are mostly static.
