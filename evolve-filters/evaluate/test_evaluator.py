@@ -20,7 +20,7 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             bench_ini = root / "bench.ini"
             load_ini = root / "load.ini"
             workload_ini = root / "workload.ini"
-            candidate = root / "candidate.json"
+            evolved_cc = root / "evolved_filter_policy.cc"
             runtime_config = root / "runtime.json"
             db_dir = root / "db"
 
@@ -33,10 +33,7 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                 "benchmarks=readrandomwriterandom\nreadwritepercent=50\n",
                 encoding="utf-8",
             )
-            candidate.write_text(
-                json.dumps({"db_bench_flags": {"max_background_jobs": 8}}),
-                encoding="utf-8",
-            )
+            evolved_cc.write_text("// evolved filter policy stub\n", encoding="utf-8")
             runtime_config.write_text(
                 json.dumps(
                     {
@@ -45,6 +42,7 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                         "workload_ini": str(workload_ini),
                         "memory_limit": "2G",
                         "cleanup_db_dir": False,
+                        "db_bench_flags": {"max_background_jobs": 8},
                     }
                 ),
                 encoding="utf-8",
@@ -90,12 +88,20 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             ), mock.patch(
                 "evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"
             ), mock.patch(
+                "evaluate.evaluator._install_evolved_filter_policy_source",
+                return_value=(True, {}),
+            ), mock.patch(
+                "evaluate.evaluator._build_rocksdb_with_cmake", return_value=(True, {})
+            ), mock.patch(
                 "evaluate.evaluator.subprocess.run",
                 side_effect=fake_run,
             ):
-                result = evaluate(str(candidate))
+                result = evaluate(str(evolved_cc))
 
             self.assertEqual(result.artifacts.get("status"), "ok")
+            self.assertEqual(
+                result.artifacts.get("evolved_source_path"), str(evolved_cc.resolve())
+            )
             self.assertGreater(result.metrics["combined_score"], 0.0)
             self.assertEqual(result.metrics["throughput_qps"], 50000.0)
             self.assertEqual(result.metrics["read_p99_us"], 18.0)
@@ -137,18 +143,18 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            runtime_config = {"base_options_file": str(base_options)}
-            candidate_config: dict[str, object] = {
+            eval_config: dict[str, object] = {
+                "base_options_file": str(base_options),
                 "options_overrides": {
                     '[TableOptions/BlockBasedTable "default"]': {
                         "block_size": "4096"
                     }
-                }
+                },
             }
 
-            _force_evolve_dummy_filter_policy(runtime_config, candidate_config)
+            _force_evolve_dummy_filter_policy(eval_config)
 
-            section = candidate_config["options_overrides"][
+            section = eval_config["options_overrides"][
                 '[TableOptions/BlockBasedTable "default"]'
             ]
             self.assertEqual(section["filter_policy"], "rocksdb.EvolveDummyFilter")
@@ -160,13 +166,13 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             bench_ini = root / "bench.ini"
             load_ini = root / "load.ini"
             workload_ini = root / "workload.ini"
-            candidate = root / "candidate.json"
+            evolved_cc = root / "evolved_filter_policy.cc"
             runtime_config = root / "runtime.json"
 
             bench_ini.write_text("num=1000\n", encoding="utf-8")
             load_ini.write_text("benchmarks=fillrandom\n", encoding="utf-8")
             workload_ini.write_text("benchmarks=readrandomwriterandom\n", encoding="utf-8")
-            candidate.write_text("{}", encoding="utf-8")
+            evolved_cc.write_text("// stub\n", encoding="utf-8")
             runtime_config.write_text(
                 json.dumps(
                     {
@@ -186,8 +192,13 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                     "DB_DIR": str(root / "db"),
                 },
                 clear=False,
-            ), mock.patch("evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"):
-                result = evaluate(str(candidate))
+            ), mock.patch("evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"), mock.patch(
+                "evaluate.evaluator._install_evolved_filter_policy_source",
+                return_value=(True, {}),
+            ), mock.patch(
+                "evaluate.evaluator._build_rocksdb_with_cmake", return_value=(True, {})
+            ):
+                result = evaluate(str(evolved_cc))
 
             self.assertEqual(result.metrics["combined_score"], 0.0)
             self.assertEqual(result.artifacts.get("status"), "error")
@@ -199,14 +210,14 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             bench_ini = root / "bench.ini"
             load_ini = root / "load.ini"
             workload_ini = root / "workload.ini"
-            candidate = root / "candidate.json"
+            evolved_cc = root / "evolved_filter_policy.cc"
             runtime_config = root / "runtime.json"
             db_dir = root / "db"
 
             bench_ini.write_text("num=1000\n", encoding="utf-8")
             load_ini.write_text("benchmarks=fillrandom\n", encoding="utf-8")
             workload_ini.write_text("benchmarks=readrandomwriterandom\n", encoding="utf-8")
-            candidate.write_text("{}", encoding="utf-8")
+            evolved_cc.write_text("// stub\n", encoding="utf-8")
             runtime_config.write_text(
                 json.dumps(
                     {
@@ -235,10 +246,15 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             ), mock.patch(
                 "evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"
             ), mock.patch(
+                "evaluate.evaluator._install_evolved_filter_policy_source",
+                return_value=(True, {}),
+            ), mock.patch(
+                "evaluate.evaluator._build_rocksdb_with_cmake", return_value=(True, {})
+            ), mock.patch(
                 "evaluate.evaluator.subprocess.run",
                 side_effect=fake_run,
             ):
-                result = evaluate(str(candidate))
+                result = evaluate(str(evolved_cc))
 
             self.assertEqual(result.metrics["combined_score"], 0.0)
             self.assertEqual(result.artifacts.get("status"), "run_failed")

@@ -6,6 +6,14 @@
   "memory_limit": "8G",
   "timeout_sec": 900,
   "cleanup_db_dir": true,
+  "db_bench_flags": {
+    "max_background_jobs": "8"
+  },
+  "options_overrides": {
+    "[TableOptions/BlockBasedTable \"default\"]": {
+      "block_size": "8192"
+    }
+  },
   "bench_overrides": {
     "num": "10000000",
     "threads": "16",
