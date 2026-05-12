@@ -50,6 +50,9 @@ except ImportError as exc:
 # Evolved C++ is installed here relative to the CMake workspace root (see _cmake_workspace_root()).
 _EVOLVE_FILTER_POLICY_CC_RELATIVE = Path("table/block_based/evolve_filter_policy.cc")
 
+_COMPUTE_BITS_PER_KEY_MICROS_PREFIX = "rocksdb.compute.bits.per.key.micros."
+_COMPUTE_BITS_PER_KEY_MICROS_P95 = f"{_COMPUTE_BITS_PER_KEY_MICROS_PREFIX}p95"
+
 
 def _failure_metrics(**overrides: float) -> dict[str, float]:
     """Same keys as the success path so MAP-Elites feature_dimensions always resolve."""
@@ -63,6 +66,24 @@ def _failure_metrics(**overrides: float) -> dict[str, float]:
     }
     metrics.update(overrides)
     return metrics
+
+
+def _bloom_stats_with_compute_bits_per_key_p95_only(
+    bloom_stats: dict[str, float],
+) -> dict[str, float]:
+    """
+    Keep only the p95 latency for COMPUTE_BITS_PER_KEY_MICROS in reported metrics.
+
+    parse_bloom_statistics may emit p50/p95/p99/p100/count/sum for
+    rocksdb.compute.bits.per.key.micros; the evaluator exposes only p95 for
+    OpenEvolve / MAP-Elites to reduce noise.
+    """
+    return {
+        k: v
+        for k, v in bloom_stats.items()
+        if not k.startswith(_COMPUTE_BITS_PER_KEY_MICROS_PREFIX)
+        or k == _COMPUTE_BITS_PER_KEY_MICROS_P95
+    }
 
 
 def _cmake_workspace_root() -> Path:
@@ -277,12 +298,24 @@ def evaluate(program_path: str) -> EvaluationResult:
             logger.info("Using patched options file %s", options_file_path)
 
         load_common_flags = _with_flag_overrides(
-            common_flags, {"statistics": "false", "report_interval_seconds": "0", "stats_interval": "0"}
+            common_flags,
+            {
+                "statistics": "false",
+                "show_table_properties": "false",
+                "report_interval_seconds": "0",
+                "stats_interval": "0",
+            },
         )
         logger.info("Load flags: %s", load_common_flags)
    
         workload_common_flags = _with_flag_overrides(
-            common_flags, {"statistics": "true", "report_interval_seconds": "0", "stats_interval": "0"}
+            common_flags,
+            {
+                "statistics": "true",
+                "show_table_properties": "true",
+                "report_interval_seconds": "0",
+                "stats_interval": "0",
+            },
         )
         logger.info("Workload flags: %s", workload_common_flags)
 
@@ -338,16 +371,11 @@ def evaluate(program_path: str) -> EvaluationResult:
                     output_text,
                     extra_artifacts={"run_return_code": str(run_result.returncode)},
                 )
-            logger.info("Workload phase completed successfully")
-            logger.info(f"Size of output: %s", len(output_text))
-            
-            logger.info("Workload phase completed successfully (1)")
+            logger.info("Workload phase completed successfully")            
             perf_metrics = parse_db_bench_output(output_text)
-            logger.info("Workload phase completed successfully (2)")
-            bloom_stats = parse_bloom_statistics(output_text)
-            logger.info("Workload phase completed successfully (3)")
+            bloom_stats_raw = parse_bloom_statistics(output_text)
+            bloom_stats = _bloom_stats_with_compute_bits_per_key_p95_only(bloom_stats_raw)
             live_sst_filter_bytes = parse_live_sst_filter_bytes(output_text)
-            logger.info("Workload phase completed successfully (4)")
 
             throughput = perf_metrics.throughput_qps or 0.0
             read_p99 = perf_metrics.read_p99_us or 0.0
@@ -388,7 +416,7 @@ def evaluate(program_path: str) -> EvaluationResult:
                     "memory_limit": memory_limit_text,
                     "db_bench_path": str(db_bench),
                     "db_dir": str(db_dir),
-                    "log": output_text,
+                    "log": "",
                 },
             )
         finally:

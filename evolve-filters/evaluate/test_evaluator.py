@@ -64,7 +64,7 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
                 "rocksdb.bloom.filter.prefix.checked COUNT : 12\n"
                 "rocksdb.bloom.filter.prefix.useful COUNT : 9\n"
                 "rocksdb.bloom.filter.prefix.true.positive COUNT : 2\n"
-                "rocksdb.compute.bits.per.key.micros P50 : 3 P99 : 12 COUNT : 250\n"
+                "rocksdb.compute.bits.per.key.micros P50 : 3 P95 : 8 P99 : 12 COUNT : 250\n"
                 "Level[0]: # entries=100 rocksdb.filter.size: 1024\n"
                 "Level[1]: # entries=200 rocksdb.filter.size: 2048\n"
             )
@@ -106,25 +106,29 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             self.assertEqual(result.metrics["throughput_qps"], 50000.0)
             self.assertEqual(result.metrics["read_p99_us"], 18.0)
             self.assertEqual(result.metrics["write_p99_us"], 25.0)
-            self.assertEqual(result.metrics["live_sst_filter_bytes"], 3072.0)
+            self.assertEqual(result.metrics["filter_memory_usage"], 3072.0)
             self.assertIn("rocksdb.bloom.filter.useful.count", result.metrics)
             self.assertIn("rocksdb.bloom.filter.full.positive.count", result.metrics)
             self.assertIn("bloom.full.observed_fp_rate", result.metrics)
             self.assertEqual(
-                result.metrics["rocksdb.compute.bits.per.key.micros.p99"], 12.0
+                result.metrics["rocksdb.compute.bits.per.key.micros.p95"], 8.0
             )
-            self.assertEqual(
-                result.metrics["rocksdb.compute.bits.per.key.micros.count"], 250.0
-            )
+            self.assertNotIn("rocksdb.compute.bits.per.key.micros.p50", result.metrics)
+            self.assertNotIn("rocksdb.compute.bits.per.key.micros.p99", result.metrics)
+            self.assertNotIn("rocksdb.compute.bits.per.key.micros.count", result.metrics)
             self.assertNotIn("rocksdb.compaction.times.micros.p99", result.metrics)
 
             self.assertEqual(len(captured_commands), 2)
-            for argv in captured_commands:
+            load_argv, workload_argv = captured_commands
+            for argv in (load_argv, workload_argv):
                 self.assertEqual(argv[0:4], ["systemd-run", "--user", "--scope", "-p"])
                 self.assertEqual(argv[4], f"MemoryMax={2 * 1024**3}")
-                self.assertIn("--statistics=true", argv)
-                self.assertIn("--show_table_properties=true", argv)
-                self.assertIn("--stats_per_interval=true", argv)
+            self.assertIn("--show_table_properties=false", load_argv)
+            self.assertIn("--show_table_properties=true", workload_argv)
+            self.assertIn("--stats_interval=0", load_argv)
+            self.assertIn("--statistics=false", load_argv)
+            self.assertIn("--statistics=true", workload_argv)
+            self.assertIn("--stats_interval=0", workload_argv)
 
     def test_force_evolve_dummy_filter_policy_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

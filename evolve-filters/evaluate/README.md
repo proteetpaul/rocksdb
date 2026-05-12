@@ -12,11 +12,17 @@ runs a RocksDB db_bench load + workload sequence and returns an
 
 ## Hard requirements enforced by evaluator
 
-- `statistics=true` is always enabled for db_bench.
+- `statistics=true` is forced for the **workload** db_bench run (load uses
+  `statistics=false` so the primary stdout parse sees workload-only tickers).
+- `show_table_properties=true` is forced for the **workload** run only (load uses
+  `show_table_properties=false` to skip extra table-property output during fill).
 - each db_bench invocation is wrapped in `systemd-run --user --scope`.
 - cgroup memory limit (`MemoryMax`) is always applied from config `memory_limit`.
-- table properties output is forced via `show_table_properties=true` and
-  `stats_per_interval=true` so live filter-size extraction is available.
+- Live filter-byte estimation reads aggregated table properties from workload
+  stdout (see above). With current in-tree `db_bench`,
+  matching `Level[n]: ... rocksdb.filter.size` lines are printed once at end of
+  each benchmark (no periodic stats needed; subprocess stderr is merged into
+  the captured stdout stream).
 
 ## Runtime config file (`OPENEVOLVE_EVAL_CONFIG`)
 
@@ -55,7 +61,8 @@ The returned `EvaluationResult.metrics` includes:
 - `read_p50_us`, `read_p99_us`, `write_p50_us`, `write_p99_us`
 - Bloom counters extracted from `rocksdb.bloom.filter.*`
 - derived full-filter FP-rate metrics
-- `live_sst_filter_bytes` parsed from aggregated table properties
+- `filter_memory_usage` parsed from aggregated table properties at end of the
+  workload db_bench run
 
 Any non-success status is returned as `combined_score=0.0` with details in
 `artifacts`.

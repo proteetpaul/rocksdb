@@ -11,6 +11,16 @@ database:
   num_islands: 3
   population_size: 50
   similarity_threshold: 0.99
+  feature_dimensions:
+    - read_p99_us
+    - throughput_qps
+    - write_p99_us
+    - filter_memory_usage
+  feature_bins:
+    read_p99_us: 5
+    write_p99_us: 5
+    throughput_qps: 5
+    filter_memory_usage: 5
 
 diff_based_evolution: true
 
@@ -18,11 +28,44 @@ llm:
   api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
   primary_model: "gemini-3-flash-preview"
   primary_model_weight: 1
+  max_tokens: 50000
+  timeout: 500
   # secondary_model: "gemini-3.1-pro-preview"
   # secondary_model_weight: 0.2
   # temperature: 0.7
+
+evaluator:
+  enable_artifacts: true      # Error feedback to LLM
+  cascade_evaluation: false
+  use_llm_feedback: true      # AI code quality assessment
+  timeout: 1200
+
+prompt:
+  # OpenEvolve resolves this relative to this config file (see openevolve/config.py).
+  template_dir: templates
+  num_top_programs: 3         # Best performers
+  num_diverse_programs: 2     # Creative exploration
+  include_artifacts: true     # Execution feedback
   system_message: |-
     You are an expert systems programmer who is well-versed in C++. You are evolving RocksDB Bloom filter policy logic inside the EVOLVE block in the given source code, specifically `ComputeBitsPerKey(const FilterBuildingContext&)`.
+
+    How to read each evaluation (metrics, MAP-Elites, artifacts)
+    - The user message includes numeric metrics from the last run, optional execution artifacts, and evolution history. Use them to judge what worked and what to try next.
+    - `combined_score` is the primary scalar fitness signal for selection; in this evaluator it equals `throughput_qps` (higher is better).
+    - `rocksdb_build_success` is 1.0 when build and benchmark completed, 0.0 on failure paths.
+    - Latency and resource metrics (lower is usually better when comparing at similar throughput): `read_p99_us`, `write_p99_us`, `filter_memory_usage` (estimated live SST filter bytes from table properties).
+    - Additional keys may appear from Bloom and filter telemetry (for example `rocksdb.bloom.filter.*`, `bloom.full.observed_fp_rate`, `bloom.full.false_positive.count`, `rocksdb.compute.bits.per.key.micros.*`). Use them as secondary signals for filter quality and `ComputeBitsPerKey` overhead.
+
+    MAP-Elites feature dimensions (diversity grid)
+    - OpenEvolve bins programs using: `read_p99_us`, `throughput_qps`, `write_p99_us`, `filter_memory_usage` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same tail latency or memory cell.
+
+    Artifacts (when `include_artifacts` is enabled)
+    - Success (`artifacts.status` / `status` = `ok`): expect paths and run metadata such as `runtime_config_path`, `evolved_source_path`, `memory_limit`, `db_bench_path`, `db_dir`, and a large `log` string (full db_bench output). Use the log for concrete errors, tail latencies, and Bloom lines; do not paste it back verbatim in a diff.
+    - `evolved_source_install_failed`: candidate file could not be installed; check `error_message` / `error_type`.
+    - `rocksdb_cmake_failed`: build failed; artifacts may include `cmake_stdout`, `cmake_stderr`, `build_stdout`, `build_stderr`, `build_directory`, `error_type`, `error_message`.
+    - `load_failed` / `run_failed`: db_bench phase failed; `load_return_code` or `run_return_code` may be present. Partial output may still appear in the artifact payload depending on failure path.
+    - `timeout` / `error`: run aborted or an unexpected exception; read `error` / `error_message`.
+    - Any non-ok status implies `combined_score` is 0.0 for that program; treat as invalid for performance comparison but useful for diagnosing bad diffs.
 
     Motivation
     - Default RocksDB filter policies are mostly static.
@@ -100,75 +143,4 @@ llm:
     - Estimates observed full-filter FP behavior from bloom counters.
     - Converts FP estimate into bits/key using `bits ~= -ln(fp) / (ln(2)^2)`.
     - Returns clamped result.
-  evaluator_message: |-
-    Evaluate candidate changes to the EVOLVE block (`ComputeBitsPerKey`) using the returned metrics and artifacts below.
-
-    Decision policy
-    - Prioritize higher `combined_score`.
-    - In this evaluator implementation, `combined_score` is currently set to `throughput_qps` in the returned metrics, so treat throughput as the primary objective signal.
-    - Prefer lower `read_p99_us`, lower `write_p99_us`, and lower `filter_memory_usage` when throughput is comparable.
-    - Prefer lower `bloom.full.observed_fp_rate` and lower `bloom.full.false_positive.count`.
-    - Prefer lower `rocksdb.compute.bits.per.key.micros.*` values (especially p50/p95/p99) to keep policy computation overhead small.
-    - Preserve diversity: when scores are close, keep behaviorally different policies (for example, different level-aware strategies).
-
-    Hard rules (must hold)
-    - Keep logic deterministic and constant-time with respect to data size.
-    - Do not add locks/synchronization in `ComputeBitsPerKey`.
-    - Preserve memory safety and ownership expectations (no unsafe raw-pointer lifetime patterns).
-    - Guard numeric operations (division/log bounds, NaN/Inf handling).
-    - Keep output in `ClampBitsPerKey()` bounds.
-    - Do not break compilation or broaden changes beyond the evolve block unless required to build.
-
-    Returned feature dimensions / key metrics
-    - `throughput_qps`: db_bench throughput (higher is better).
-    - `read_p99_us`: point-read tail latency in microseconds (lower is better).
-    - `write_p99_us`: write tail latency in microseconds (lower is better).
-    - `filter_memory_usage`: estimated live SST filter bytes parsed from table properties (lower is better).
-    - `rocksdb_build_success`: 1.0 on successful build+run, 0.0 when build fails.
-    - Bloom stats from `parse_bloom_statistics`:
-      - any `rocksdb.bloom.filter.*` parsed counters/histogram fields
-      - `bloom.full.false_positive.count`
-      - `bloom.full.observed_fp_rate`
-      - `rocksdb.compute.bits.per.key.micros.*` timing fields when present (time spent inside `ComputeBitsPerKey`)
-
-    Returned artifacts (how to interpret)
-    - Success (`status=ok`):
-      - includes runtime metadata and full benchmark log:
-        `runtime_config_path`, `evolved_source_path`, `memory_limit`,
-        `db_bench_path`, `db_dir`, `log`
-    - Build/install failures:
-      - `status=evolved_source_install_failed` with install context
-      - `status=rocksdb_cmake_failed` with detailed CMake/build fields such as:
-        `error_type`, `error_message`, `build_directory`,
-        and possibly `cmake_stdout`, `cmake_stderr`, `build_stdout`, `build_stderr`
-    - Runtime execution failures:
-      - `status=load_failed` and `load_return_code`
-      - `status=run_failed` and `run_return_code`
-      - `status=timeout`
-      - `status=error`
-    - Any non-`ok` status returns `combined_score=0.0` and should be treated as invalid for selection.
-
-evaluator:
-  enable_artifacts: true      # Error feedback to LLM
-  cascade_evaluation: false
-  use_llm_feedback: true      # AI code quality assessment
-  timeout: 1200
-
-prompt:
-  num_top_programs: 3         # Best performers
-  num_diverse_programs: 2     # Creative exploration
-  include_artifacts: true     # Execution feedback
-
-database:
-  feature_dimensions:
-    - read_p99_us
-    - throughput_qps
-    - write_p99_us
-    - filter_memory_usage
-  
-  feature_bins:
-    read_p99_us: 5
-    write_p99_us: 5
-    throughput_qps: 5
-    filter_memory_usage: 5
 

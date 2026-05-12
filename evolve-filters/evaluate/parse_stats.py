@@ -68,10 +68,17 @@ def parse_live_sst_filter_bytes(text: str) -> float:
     """
     Parse text output and estimate current total live SST filter bytes.
 
+    Matches **table property** labels (``TablePropertiesNames::kFilterSize`` /
+    ``rocksdb.filter.size``). In-tree ``db_bench`` prints the same ``Level[N]:``
+    lines once at end of each benchmark when ``--show_table_properties`` is
+    set (and still may print them during periodic stats if enabled). This is
+    not the final ``STATISTICS:`` ticker dump (that block is from
+    ``statistics.h`` only).
+
     Preference order:
-    1) Sum of the latest per-level `filter_size` values from lines with
-       `Level[N]` prefixes.
-    2) The latest global `rocksdb.filter.size`/`filter_size` value.
+    1) Sum of the latest per-level values from lines with ``Level[N]`` prefixes.
+    2) The latest global line matching ``rocksdb.filter.size``, ``filter_size``,
+       or ``filter block size`` (as formatted in table property output).
     """
     level_values: dict[int, float] = {}
     global_values: list[float] = []

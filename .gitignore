@@ -32,6 +32,9 @@ CMakeFiles/
 build/
 bench/LHS/logs/
 evolve-filters/openevolve_output/logs/
+evolve-filters/artifacts/
+evolve-filters/checkpoints/
+evolve-filters/openevolve_output/checkpoints/
 
 ldb
 manifest_dump

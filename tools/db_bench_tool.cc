@@ -3579,6 +3579,56 @@ class Benchmark {
     fprintf(stderr, "...Verified\n");
   }
 
+  void PrintAggregatedTablePropertiesAtEnd() {
+    if (!FLAGS_show_table_properties) {
+      return;
+    }
+
+    auto print_dbw = [](DBWithColumnFamilies* dbw) {
+      if (dbw == nullptr || dbw->db == nullptr) {
+        return;
+      }
+      DB* db = dbw->db;
+      std::string stats;
+      const size_t num_cf = dbw->num_created.load();
+      if (num_cf > 0) {
+        for (size_t i = 0; i < num_cf; ++i) {
+          for (int level = 0; level < FLAGS_num_levels; ++level) {
+            if (db->GetProperty(
+                    dbw->cfh[i],
+                    "rocksdb.aggregated-table-properties-at-level" +
+                        std::to_string(level),
+                    &stats)) {
+              if (stats.find("# entries=0") == std::string::npos) {
+                fprintf(stdout, "Level[%d]: %s\n", level, stats.c_str());
+              }
+            }
+          }
+        }
+      } else {
+        for (int level = 0; level < FLAGS_num_levels; ++level) {
+          if (db->GetProperty("rocksdb.aggregated-table-properties-at-level" +
+                                   std::to_string(level),
+                               &stats)) {
+            if (stats.find("# entries=0") == std::string::npos) {
+              fprintf(stdout, "Level[%d]: %s\n", level, stats.c_str());
+            }
+          }
+        }
+      }
+    };
+
+    if (db_.db != nullptr) {
+      print_dbw(&db_);
+    } else {
+      // Multi-DB: each shard emits Level[k] lines with the same labels as the
+      // periodic-stats path; single-shard workloads are the common case.
+      for (auto& dbw : multi_dbs_) {
+        print_dbw(&dbw);
+      }
+    }
+  }
+
   void ErrorExit() {
     DeleteDBs();
     db_bench_exit(1);
@@ -4077,6 +4127,7 @@ class Benchmark {
     if (FLAGS_statistics) {
       fprintf(stdout, "STATISTICS:\n%s\n", dbstats->ToString().c_str());
     }
+    PrintAggregatedTablePropertiesAtEnd();
     if (FLAGS_simcache_size >= 0) {
       fprintf(
           stdout, "SIMULATOR CACHE STATISTICS:\n%s\n",
