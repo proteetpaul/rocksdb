@@ -29,9 +29,6 @@ class EvolveDummyFilterPolicy : public FilterPolicy {
   FilterBitsReader* GetFilterBitsReader(const Slice& contents) const override;
 
  private:
-  static double ClampBitsPerKey(double bits_per_key);
-  static int64_t ToMillibits(double bits_per_key);
-
   double ComputeBitsPerKey(const FilterBuildingContext& context) const;
 
   const FilterPolicy* GetOrCreateDelegate(double bits_per_key) const;

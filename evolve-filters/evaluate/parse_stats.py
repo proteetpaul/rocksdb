@@ -1,12 +1,13 @@
-"""Parsers for Bloom-focused RocksDB STATISTICS and table properties output."""
+"""Parsers for RocksDB STATISTICS snippets (Bloom, block cache) and table properties."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Iterator
 
 _LEVEL_PREFIX_RE = re.compile(r"Level\[(\d+)\]")
+_BLOCK_CACHE_TICKERS = frozenset({"rocksdb.block.cache.hit", "rocksdb.block.cache.miss"})
 _FILTER_VALUE_RE = re.compile(
     r"(?:rocksdb\.filter\.size|filter_size|filter block size)\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
     re.IGNORECASE,
@@ -23,18 +24,8 @@ def parse_bloom_statistics(text: str) -> Dict[str, float]:
     and also emits derived false-positive metrics for point lookups.
     """
     metrics: Dict[str, float] = {}
-    in_stats_block = False
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if "STATISTICS:" in line.upper():
-            in_stats_block = True
-            continue
-        if not in_stats_block:
-            continue
-
+    for line in _iter_statistics_lines(text):
         parsed = _parse_stats_line(line)
         if not parsed:
             continue
@@ -63,6 +54,42 @@ def parse_bloom_statistics(text: str) -> Dict[str, float]:
     metrics["bloom.full.observed_fp_rate"] = observed_fp_rate
 
     return metrics
+
+
+def parse_block_cache_statistics(text: str) -> Dict[str, float]:
+    """
+    Parse RocksDB STATISTICS ticker lines for aggregate block cache hit/miss.
+
+    Matches ``rocksdb.block.cache.hit`` / ``rocksdb.block.cache.miss`` from
+    ``Statistics::ToString()`` (see ``TickersNameMap``).
+    """
+    metrics: Dict[str, float] = {}
+    for line in _iter_statistics_lines(text):
+        parsed = _parse_stats_line(line)
+        if not parsed:
+            continue
+        base_name, values = parsed
+        lowered = base_name.lower()
+        if lowered not in _BLOCK_CACHE_TICKERS:
+            continue
+        for suffix, value in values.items():
+            metrics[f"{lowered}.{suffix.lower()}"] = value
+    return metrics
+
+
+def _iter_statistics_lines(text: str) -> Iterator[str]:
+    """Yield stripped non-empty lines after the first ``STATISTICS:`` header."""
+    in_stats_block = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "STATISTICS:" in line.upper():
+            in_stats_block = True
+            continue
+        if not in_stats_block:
+            continue
+        yield line
 
 
 @dataclass(frozen=True)

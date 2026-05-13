@@ -33,10 +33,7 @@ def parse_throughput_readrandomwriterandom(text: str) -> float | None:
     return None
 
 
-_PERCENTILES_RE = re.compile(
-    r"P50:\s*([\d.]+).*?P99:\s*([\d.]+)",
-    re.IGNORECASE | re.DOTALL,
-)
+_PERCENTILES_RE = re.compile(r"P50:\s*([\d.]+).*?P99:\s*([\d.]+)", re.IGNORECASE)
 
 
 def parse_read_write_histograms(text: str) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
@@ -45,26 +42,44 @@ def parse_read_write_histograms(text: str) -> tuple[tuple[float, float] | None, 
     read_pair: tuple[float, float] | None = None
     write_pair: tuple[float, float] | None = None
 
-    read_match = re.search(
-        r"Microseconds per read:\s*(.*?)(?=Microseconds per write:|Microseconds per |\Z)",
-        text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if read_match:
-        percentile_match = _PERCENTILES_RE.search(read_match.group(1))
-        if percentile_match:
-            read_pair = (float(percentile_match.group(1)), float(percentile_match.group(2)))
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
 
-    for write_match in re.finditer(
-        r"Microseconds per write:\s*(.*?)(?=Microseconds per |\Z)",
-        text,
-        re.DOTALL | re.IGNORECASE,
-    ):
-        percentile_match = _PERCENTILES_RE.search(write_match.group(1))
-        if percentile_match:
-            write_pair = (float(percentile_match.group(1)), float(percentile_match.group(2)))
+    while i < n:
+        line = lines[i].strip()
+        lowered = line.lower()
+        if lowered.startswith("microseconds per read:") and read_pair is None:
+            read_pair = _extract_percentiles_from_following_lines(lines, i + 1)
+        elif lowered.startswith("microseconds per write:"):
+            # Keep last write block seen, matching previous behavior.
+            write_pair = _extract_percentiles_from_following_lines(lines, i + 1)
+        i += 1
 
     return read_pair, write_pair
+
+
+def _extract_percentiles_from_following_lines(
+    lines: list[str], start_idx: int
+) -> tuple[float, float] | None:
+    """Scan a histogram block until the next section header and parse P50/P99."""
+    block: list[str] = []
+    i = start_idx
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        lowered = stripped.lower()
+        if lowered.startswith("microseconds per "):
+            break
+        block.append(stripped)
+        i += 1
+
+    if not block:
+        return None
+    percentile_match = _PERCENTILES_RE.search(" ".join(block))
+    if not percentile_match:
+        return None
+    return (float(percentile_match.group(1)), float(percentile_match.group(2)))
 
 
 def parse_db_bench_output(text: str) -> DbBenchMetrics:

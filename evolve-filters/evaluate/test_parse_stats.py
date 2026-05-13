@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from evaluate.parse_stats import LiveSstFilterBytes, parse_live_sst_filter_bytes
+from evaluate.parse_stats import (
+    LiveSstFilterBytes,
+    parse_block_cache_statistics,
+    parse_live_sst_filter_bytes,
+)
 
 
 class TestParseLiveSstFilterBytes(unittest.TestCase):
@@ -37,6 +41,18 @@ class TestParseLiveSstFilterBytes(unittest.TestCase):
         self.assertEqual(out.per_level_bytes, {1: 11.0})
         self.assertEqual(out.global_bytes, 13.0)
         self.assertEqual(out.aggregated_bytes(), 11.0)
+
+
+class TestParseBlockCacheStatistics(unittest.TestCase):
+    def test_hit_and_miss_counts_from_statistics_block(self) -> None:
+        text = (
+            "STATISTICS:\n"
+            "rocksdb.block.cache.hit COUNT : 90000\n"
+            "rocksdb.block.cache.miss COUNT : 1000\n"
+        )
+        out = parse_block_cache_statistics(text)
+        self.assertEqual(out["rocksdb.block.cache.hit.count"], 90000.0)
+        self.assertEqual(out["rocksdb.block.cache.miss.count"], 1000.0)
 
 
 if __name__ == "__main__":

@@ -190,6 +190,7 @@ COMMON_FLAGS=(
   --key_size="$KEY_SIZE"
   --value_size="$VALUE_SIZE"
   --compression_type="$COMPRESSION_TYPE"
+  --show_table_properties=true
 )
 if [[ "$STATISTICS" == "true" ]]; then
   COMMON_FLAGS+=(--statistics)

@@ -49,6 +49,7 @@ from evaluate.checkpoint_db import CheckpointError, create_checkpoint
 from evaluate.cleanup_checkpoint import remove_checkpoint_tree
 from evaluate.parse_stats import (
     LiveSstFilterBytes,
+    parse_block_cache_statistics,
     parse_bloom_statistics,
     parse_live_sst_filter_bytes,
 )
@@ -467,6 +468,7 @@ def evaluate(program_path: str) -> EvaluationResult:
             perf_metrics = parse_db_bench_output(output_text)
             bloom_stats_raw = parse_bloom_statistics(output_text)
             bloom_stats = _bloom_stats_with_compute_bits_per_key_p95_only(bloom_stats_raw)
+            block_cache_stats = parse_block_cache_statistics(output_text)
             live_sst_filters = parse_live_sst_filter_bytes(output_text)
 
             throughput = perf_metrics.throughput_qps or 0.0
@@ -491,6 +493,7 @@ def evaluate(program_path: str) -> EvaluationResult:
             }
             metrics.update(_live_sst_filter_metrics(live_sst_filters))
             metrics.update(bloom_stats)
+            metrics.update(block_cache_stats)
 
             logger.info(
                 "Evaluation ok throughput_qps=%s read_p99_us=%s bloom_stat_keys=%s filter_bytes=%s",
