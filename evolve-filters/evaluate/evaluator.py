@@ -47,7 +47,11 @@ from dremel.parse_db_bench import parse_db_bench_output
 
 from evaluate.checkpoint_db import CheckpointError, create_checkpoint
 from evaluate.cleanup_checkpoint import remove_checkpoint_tree
-from evaluate.parse_stats import parse_bloom_statistics, parse_live_sst_filter_bytes
+from evaluate.parse_stats import (
+    LiveSstFilterBytes,
+    parse_bloom_statistics,
+    parse_live_sst_filter_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +70,7 @@ def _failure_metrics(**overrides: float) -> dict[str, float]:
         "throughput_qps": 0.0,
         "read_p99_us": 0.0,
         "write_p99_us": 0.0,
-        "filter_memory_usage": 0.0,
+        "filter_memory_usage_total": 0.0,
     }
     metrics.update(overrides)
     return metrics
@@ -88,6 +92,18 @@ def _bloom_stats_with_compute_bits_per_key_p95_only(
         if not k.startswith(_COMPUTE_BITS_PER_KEY_MICROS_PREFIX)
         or k == _COMPUTE_BITS_PER_KEY_MICROS_P95
     }
+
+
+def _live_sst_filter_metrics(parsed: LiveSstFilterBytes) -> dict[str, float]:
+    """Flatten filter table-property stats into ``metrics`` float keys.
+
+    Exposes one aggregate ``filter_memory_usage_total`` (same semantics as
+    ``LiveSstFilterBytes.aggregated_bytes()``) plus optional per-level breakdown.
+    """
+    out: dict[str, float] = {"filter_memory_usage_total": parsed.aggregated_bytes()}
+    for level in sorted(parsed.per_level_bytes.keys()):
+        out[f"filter_memory_usage.level.{level}"] = parsed.per_level_bytes[level]
+    return out
 
 
 def _cmake_workspace_root() -> Path:
@@ -451,7 +467,7 @@ def evaluate(program_path: str) -> EvaluationResult:
             perf_metrics = parse_db_bench_output(output_text)
             bloom_stats_raw = parse_bloom_statistics(output_text)
             bloom_stats = _bloom_stats_with_compute_bits_per_key_p95_only(bloom_stats_raw)
-            live_sst_filter_bytes = parse_live_sst_filter_bytes(output_text)
+            live_sst_filters = parse_live_sst_filter_bytes(output_text)
 
             throughput = perf_metrics.throughput_qps or 0.0
             read_p99 = perf_metrics.read_p99_us or 0.0
@@ -463,7 +479,7 @@ def evaluate(program_path: str) -> EvaluationResult:
             # latency_factor = (read_latency_factor + write_latency_factor) / 2.0
 
             # fp_factor = max(0.0, 1.0 - observed_fp_rate)
-            # memory_factor = 1.0 / (1.0 + (live_sst_filter_bytes / (64.0 * 1024 * 1024)))
+            # memory_factor = 1.0 / (1.0 + (live_sst_filters.aggregated_bytes() / (64.0 * 1024 * 1024)))
             # combined_score = throughput * memory_factor
 
             metrics: dict[str, float] = {
@@ -472,8 +488,8 @@ def evaluate(program_path: str) -> EvaluationResult:
                 "throughput_qps": throughput,
                 "read_p99_us": read_p99,
                 "write_p99_us": write_p99,
-                "filter_memory_usage": live_sst_filter_bytes,
             }
+            metrics.update(_live_sst_filter_metrics(live_sst_filters))
             metrics.update(bloom_stats)
 
             logger.info(
@@ -481,7 +497,6 @@ def evaluate(program_path: str) -> EvaluationResult:
                 perf_metrics.throughput_qps,
                 perf_metrics.read_p99_us,
                 len(bloom_stats),
-                live_sst_filter_bytes,
             )
             return EvaluationResult(
                 metrics=metrics,

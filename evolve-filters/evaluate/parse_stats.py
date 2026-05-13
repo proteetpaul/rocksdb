@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Dict
 
 _LEVEL_PREFIX_RE = re.compile(r"Level\[(\d+)\]")
@@ -64,24 +65,44 @@ def parse_bloom_statistics(text: str) -> Dict[str, float]:
     return metrics
 
 
-def parse_live_sst_filter_bytes(text: str) -> float:
+@dataclass(frozen=True)
+class LiveSstFilterBytes:
+    """Table-property filter size totals from ``db_bench`` / RocksDB textual output."""
+
+    per_level_bytes: dict[int, float]
+    """Most recent parsed filter size bytes for each ``Level[N]`` line."""
+
+    global_bytes: float | None
+    """Most recent parsed value from a non-level line (``rocksdb.filter.size`` and synonyms)."""
+
+    def aggregated_bytes(self) -> float:
+        """
+        Same decision order as the historical single-float helper:
+
+        1) Sum of per-level values when any ``Level[N]`` line was seen.
+        2) Else the latest global line value.
+        3) Else ``0.0``.
+        """
+        if self.per_level_bytes:
+            return float(sum(self.per_level_bytes.values()))
+        if self.global_bytes is not None:
+            return float(self.global_bytes)
+        return 0.0
+
+
+def parse_live_sst_filter_bytes(text: str) -> LiveSstFilterBytes:
     """
-    Parse text output and estimate current total live SST filter bytes.
+    Parse table-property filter sizes: per-level, global tail value, and aggregate.
 
     Matches **table property** labels (``TablePropertiesNames::kFilterSize`` /
-    ``rocksdb.filter.size``). In-tree ``db_bench`` prints the same ``Level[N]:``
-    lines once at end of each benchmark when ``--show_table_properties`` is
-    set (and still may print them during periodic stats if enabled). This is
-    not the final ``STATISTICS:`` ticker dump (that block is from
-    ``statistics.h`` only).
+    ``rocksdb.filter.size``). In-tree ``db_bench`` prints ``Level[N]:`` lines
+    when ``--show_table_properties`` is set.
 
-    Preference order:
-    1) Sum of the latest per-level values from lines with ``Level[N]`` prefixes.
-    2) The latest global line matching ``rocksdb.filter.size``, ``filter_size``,
-       or ``filter block size`` (as formatted in table property output).
+    Parses every matching line in order so later rows overwrite earlier ones within
+    the same category (same level index, or global).
     """
     level_values: dict[int, float] = {}
-    global_values: list[float] = []
+    global_last: float | None = None
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -95,13 +116,12 @@ def parse_live_sst_filter_bytes(text: str) -> float:
         if level_match:
             level_values[int(level_match.group(1))] = value
         else:
-            global_values.append(value)
+            global_last = value
 
-    if level_values:
-        return float(sum(level_values.values()))
-    if global_values:
-        return float(global_values[-1])
-    return 0.0
+    return LiveSstFilterBytes(
+        per_level_bytes=dict(level_values),
+        global_bytes=global_last,
+    )
 
 
 def _parse_stats_line(line: str) -> tuple[str, Dict[str, float]] | None:

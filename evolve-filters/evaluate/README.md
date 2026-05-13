@@ -61,7 +61,7 @@ The returned `EvaluationResult.metrics` includes:
 - `read_p50_us`, `read_p99_us`, `write_p50_us`, `write_p99_us`
 - Bloom counters extracted from `rocksdb.bloom.filter.*`
 - derived full-filter FP-rate metrics
-- `filter_memory_usage` parsed from aggregated table properties at end of the
+- `filter_memory_usage_total` parsed from aggregated table properties at end of the
   workload db_bench run
 
 Any non-success status is returned as `combined_score=0.0` with details in

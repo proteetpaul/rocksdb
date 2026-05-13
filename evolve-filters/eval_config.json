@@ -4,5 +4,6 @@
   "load_ini": "bench/workloads/load.ini",
   "workload_ini": "bench/workloads/workload_a.ini",
   "base_options_file": "bench/rocksdb_options.ini",
-  "cleanup_db_dir": true
+  "cleanup_db_dir": true,
+  "use_checkpoint": true
 }

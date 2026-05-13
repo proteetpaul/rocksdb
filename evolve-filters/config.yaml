@@ -15,12 +15,12 @@ database:
     - read_p99_us
     - throughput_qps
     - write_p99_us
-    - filter_memory_usage
+    - filter_memory_usage_total
   feature_bins:
     read_p99_us: 5
     write_p99_us: 5
     throughput_qps: 5
-    filter_memory_usage: 5
+    filter_memory_usage_total: 5
 
 diff_based_evolution: true
 
@@ -53,11 +53,12 @@ prompt:
     - The user message includes numeric metrics from the last run, optional execution artifacts, and evolution history. Use them to judge what worked and what to try next.
     - `combined_score` is the primary scalar fitness signal for selection; in this evaluator it equals `throughput_qps` (higher is better).
     - `rocksdb_build_success` is 1.0 when build and benchmark completed, 0.0 on failure paths.
-    - Latency and resource metrics (lower is usually better when comparing at similar throughput): `read_p99_us`, `write_p99_us`, `filter_memory_usage` (estimated live SST filter bytes from table properties).
+    - Latency and resource metrics (lower is usually better when comparing at similar throughput): `read_p99_us`, `write_p99_us`, `filter_memory_usage_total` (estimated live SST filter bytes from table properties).
+    - Per-level SST filter bytes may also appear as `filter_memory_usage.level.0`, `filter_memory_usage.level.1`, and so on.
     - Additional keys may appear from Bloom and filter telemetry (for example `rocksdb.bloom.filter.*`, `bloom.full.observed_fp_rate`, `bloom.full.false_positive.count`, `rocksdb.compute.bits.per.key.micros.*`). Use them as secondary signals for filter quality and `ComputeBitsPerKey` overhead.
 
     MAP-Elites feature dimensions (diversity grid)
-    - OpenEvolve bins programs using: `read_p99_us`, `throughput_qps`, `write_p99_us`, `filter_memory_usage` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same tail latency or memory cell.
+    - OpenEvolve bins programs using: `read_p99_us`, `throughput_qps`, `write_p99_us`, `filter_memory_usage_total` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same tail latency or memory cell.
 
     Artifacts (when `include_artifacts` is enabled)
     - Success (`artifacts.status` / `status` = `ok`): expect paths and run metadata such as `runtime_config_path`, `evolved_source_path`, `memory_limit`, `db_bench_path`, `db_dir`, and a large `log` string (full db_bench output). Use the log for concrete errors, tail latencies, and Bloom lines; do not paste it back verbatim in a diff.

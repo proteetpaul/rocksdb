@@ -106,7 +106,9 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             self.assertEqual(result.metrics["throughput_qps"], 50000.0)
             self.assertEqual(result.metrics["read_p99_us"], 18.0)
             self.assertEqual(result.metrics["write_p99_us"], 25.0)
-            self.assertEqual(result.metrics["filter_memory_usage"], 3072.0)
+            self.assertEqual(result.metrics["filter_memory_usage_total"], 3072.0)
+            self.assertEqual(result.metrics["filter_memory_usage.level.0"], 1024.0)
+            self.assertEqual(result.metrics["filter_memory_usage.level.1"], 2048.0)
             self.assertIn("rocksdb.bloom.filter.useful.count", result.metrics)
             self.assertIn("rocksdb.bloom.filter.full.positive.count", result.metrics)
             self.assertIn("bloom.full.observed_fp_rate", result.metrics)
@@ -353,6 +355,9 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             self.assertNotIn("--benchmarks=fillrandom", " ".join(workload_argv))
             self.assertEqual(workload_argv[0:4], ["systemd-run", "--user", "--scope", "-p"])
             self.assertEqual(workload_argv[4], f"MemoryMax={2 * 1024**3}")
+            self.assertEqual(result.metrics["filter_memory_usage_total"], 1024.0)
+            self.assertEqual(result.metrics["filter_memory_usage.level.0"], 1024.0)
+            self.assertNotIn("filter_memory_usage.level.1", result.metrics)
 
 
 if __name__ == "__main__":
