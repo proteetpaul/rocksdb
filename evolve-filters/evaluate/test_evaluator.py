@@ -263,6 +263,97 @@ class TestOpenEvolveEvaluator(unittest.TestCase):
             self.assertEqual(result.metrics["combined_score"], 0.0)
             self.assertEqual(result.artifacts.get("status"), "run_failed")
 
+    def test_use_checkpoint_skips_db_bench_load(self) -> None:
+        """With use_checkpoint, only workload db_bench runs; create_checkpoint is used."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            golden = root / "golden"
+            golden.mkdir()
+            bench_ini = root / "bench.ini"
+            load_ini = root / "load.ini"
+            workload_ini = root / "workload.ini"
+            evolved_cc = root / "evolved_filter_policy.cc"
+            runtime_config = root / "runtime.json"
+            db_dir = root / "scratch"
+
+            bench_ini.write_text(
+                "num=1000\nkey_size=16\nvalue_size=128\nthreads=4\n"
+                "duration=10\nhistogram=true\n",
+                encoding="utf-8",
+            )
+            load_ini.write_text("benchmarks=fillrandom\nthreads=1\n", encoding="utf-8")
+            workload_ini.write_text(
+                "benchmarks=readrandomwriterandom\nreadwritepercent=50\n",
+                encoding="utf-8",
+            )
+            evolved_cc.write_text("// evolved filter policy stub\n", encoding="utf-8")
+            runtime_config.write_text(
+                json.dumps(
+                    {
+                        "bench_ini": str(bench_ini),
+                        "load_ini": str(load_ini),
+                        "workload_ini": str(workload_ini),
+                        "memory_limit": "2G",
+                        "cleanup_db_dir": True,
+                        "use_checkpoint": True,
+                        "golden_db_dir": str(golden),
+                        "ldb": "/bin/true",
+                        "db_bench_flags": {"max_background_jobs": 8},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            run_output = (
+                "readrandomwriterandom : 10.000 micros/op 50000 ops/sec "
+                "1.000 seconds 1000000 operations\n"
+                "Microseconds per read:\n"
+                "Percentiles: P50: 4.50 P75: 6.00 P99: 18.00\n"
+                "Microseconds per write:\n"
+                "Percentiles: P50: 7.00 P75: 10.00 P99: 25.00\n"
+                "STATISTICS:\n"
+                "rocksdb.bloom.filter.useful COUNT : 100\n"
+                "rocksdb.compute.bits.per.key.micros P95 : 8 COUNT : 250\n"
+                "Level[0]: # entries=100 rocksdb.filter.size: 1024\n"
+            )
+
+            captured_commands: list[list[str]] = []
+
+            def fake_run(argv, **_kwargs):  # type: ignore[no-untyped-def]
+                captured_commands.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, stdout=run_output)
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENEVOLVE_EVAL_CONFIG": str(runtime_config),
+                    "DB_BENCH": "/bin/true",
+                    "DB_DIR": str(db_dir),
+                },
+                clear=False,
+            ), mock.patch(
+                "evaluate.evaluator.shutil.which", return_value="/usr/bin/systemd-run"
+            ), mock.patch(
+                "evaluate.evaluator._install_evolved_filter_policy_source",
+                return_value=(True, {}),
+            ), mock.patch(
+                "evaluate.evaluator._build_rocksdb_with_cmake", return_value=(True, {})
+            ), mock.patch(
+                "evaluate.evaluator.create_checkpoint"
+            ) as mock_ckpt, mock.patch(
+                "evaluate.evaluator.subprocess.run",
+                side_effect=fake_run,
+            ):
+                result = evaluate(str(evolved_cc))
+
+            mock_ckpt.assert_called_once()
+            self.assertEqual(result.artifacts.get("status"), "ok")
+            self.assertEqual(len(captured_commands), 1)
+            workload_argv = captured_commands[0]
+            self.assertNotIn("--benchmarks=fillrandom", " ".join(workload_argv))
+            self.assertEqual(workload_argv[0:4], ["systemd-run", "--user", "--scope", "-p"])
+            self.assertEqual(workload_argv[4], f"MemoryMax={2 * 1024**3}")
+
 
 if __name__ == "__main__":
     unittest.main()

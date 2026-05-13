@@ -32,11 +32,6 @@ def _prepend_sys_path(path: Path) -> None:
 for _root in (WORKSPACE_ROOT, EVOLVE_ROOT, _OPENVOLVE_PKG_ROOT):
     _prepend_sys_path(_root)
 
-from dremel.options_file import write_options_file
-from dremel.parse_db_bench import parse_db_bench_output
-
-from evaluate.parse_stats import parse_bloom_statistics, parse_live_sst_filter_bytes
-
 logger = logging.getLogger(__name__)
 
 try:
@@ -46,6 +41,15 @@ except ImportError as exc:
         "openevolve.evaluation_result is required for this evaluator (same class OpenEvolve "
         "uses for isinstance checks). Ensure the vendored openevolve package is on PYTHONPATH."
     ) from exc
+
+from dremel.options_file import write_options_file
+from dremel.parse_db_bench import parse_db_bench_output
+
+from evaluate.checkpoint_db import CheckpointError, create_checkpoint
+from evaluate.cleanup_checkpoint import remove_checkpoint_tree
+from evaluate.parse_stats import parse_bloom_statistics, parse_live_sst_filter_bytes
+
+logger = logging.getLogger(__name__)
 
 # Evolved C++ is installed here relative to the CMake workspace root (see _cmake_workspace_root()).
 _EVOLVE_FILTER_POLICY_CC_RELATIVE = Path("table/block_based/evolve_filter_policy.cc")
@@ -322,33 +326,105 @@ def evaluate(program_path: str) -> EvaluationResult:
         load_flags = _ini_to_argv(load_values)
         workload_flags = _ini_to_argv(workload_values)
 
-        try:
-            _recreate_dir(db_dir)
-            logger.info("Recreated database directory %s", db_dir)
+        use_checkpoint = _config_bool(eval_config.get("use_checkpoint"))
+        checkpoint_protected: frozenset[Path] = frozenset()
+        ldb_bin: Path | None = None
+        golden_path: Path | None = None
 
-            load_argv = _scoped_argv(
-                db_bench,
-                load_common_flags + load_flags,
-                memory_limit_bytes,
+        if use_checkpoint:
+            golden_raw = (
+                eval_config.get("golden_db_dir")
+                or os.environ.get("GOLDEN_DB_DIR")
+                or os.environ.get("CHECKPOINT_SOURCE_DB")
             )
-            logger.info("Starting db_bench load phase (MemoryMax=%s)", memory_limit_bytes)
-            load_result = _run(load_argv, timeout_sec=timeout_sec)
-            if load_result.returncode != 0:
-                logger.warning(
-                    "Load phase failed returncode=%s db_bench=%s",
-                    load_result.returncode,
-                    db_bench,
-                )
-                logger.warning(
-                    "Load phase output:\n%s",
-                    (load_result.stdout or "").rstrip(),
-                )
+            ldb_raw = eval_config.get("ldb") or os.environ.get("LDB")
+            if not golden_raw or not str(golden_raw).strip():
                 return _error_result(
-                    "load_failed",
-                    load_result.stdout,
-                    extra_artifacts={"load_return_code": str(load_result.returncode)},
+                    "checkpoint_config",
+                    "use_checkpoint requires golden_db_dir or GOLDEN_DB_DIR / "
+                    "CHECKPOINT_SOURCE_DB",
                 )
-            logger.info("Load phase completed successfully")
+            if not ldb_raw or not str(ldb_raw).strip():
+                return _error_result(
+                    "checkpoint_config",
+                    "use_checkpoint requires ldb in eval config or LDB env",
+                )
+            golden_path = _resolve_repo_relative_path(str(golden_raw).strip())
+            ldb_bin = _resolve_repo_relative_path(str(ldb_raw).strip())
+            if not golden_path.is_dir():
+                return _error_result(
+                    "invalid_golden_db",
+                    f"golden_db_dir is not a directory: {golden_path}",
+                )
+            if not ldb_bin.is_file() or not os.access(ldb_bin, os.X_OK):
+                return _error_result(
+                    "invalid_ldb",
+                    f"ldb is not an executable file: {ldb_bin}",
+                )
+            if db_dir.resolve() == golden_path:
+                return _error_result(
+                    "invalid_db_dir",
+                    "DB_DIR must not equal golden_db_dir when use_checkpoint is true",
+                )
+            checkpoint_protected = frozenset({golden_path})
+
+        try:
+            if use_checkpoint:
+                assert golden_path is not None and ldb_bin is not None
+                _remove_db_dir_for_checkpoint(db_dir)
+                logger.info(
+                    "Removed scratch DB directory %s before checkpoint (directory must "
+                    "not exist for ldb)",
+                    db_dir,
+                )
+                try:
+                    create_checkpoint(ldb_bin, golden_path, db_dir)
+                except CheckpointError as exc:
+                    msg = str(exc)
+                    extra_ck: dict[str, str] = {}
+                    if exc.returncode is not None:
+                        extra_ck["checkpoint_return_code"] = str(exc.returncode)
+                    if exc.stderr:
+                        extra_ck["checkpoint_stderr"] = exc.stderr[:8000]
+                    if exc.stdout:
+                        extra_ck["checkpoint_stdout"] = exc.stdout[:8000]
+                    logger.warning("Checkpoint failed: %s", msg)
+                    return _error_result(
+                        "checkpoint_failed", msg, extra_artifacts=extra_ck
+                    )
+                logger.info("Checkpoint from %s to %s completed", golden_path, db_dir)
+            else:
+                _recreate_dir(db_dir)
+                logger.info("Recreated database directory %s", db_dir)
+
+            if not use_checkpoint:
+                load_argv = _scoped_argv(
+                    db_bench,
+                    load_common_flags + load_flags,
+                    memory_limit_bytes,
+                )
+                logger.info(
+                    "Starting db_bench load phase (MemoryMax=%s)", memory_limit_bytes
+                )
+                load_result = _run(load_argv, timeout_sec=timeout_sec)
+                if load_result.returncode != 0:
+                    logger.warning(
+                        "Load phase failed returncode=%s db_bench=%s",
+                        load_result.returncode,
+                        db_bench,
+                    )
+                    logger.warning(
+                        "Load phase output:\n%s",
+                        (load_result.stdout or "").rstrip(),
+                    )
+                    return _error_result(
+                        "load_failed",
+                        load_result.stdout or "",
+                        extra_artifacts={
+                            "load_return_code": str(load_result.returncode)
+                        },
+                    )
+                logger.info("Load phase completed successfully")
 
             run_argv = _scoped_argv(
                 db_bench,
@@ -422,7 +498,9 @@ def evaluate(program_path: str) -> EvaluationResult:
         finally:
             if options_file_path is not None and options_file_path.is_file():
                 options_file_path.unlink()
-            _cleanup_db_dir_if_requested(eval_config, db_dir)
+            _cleanup_db_dir_if_requested(
+                eval_config, db_dir, protected_roots=checkpoint_protected
+            )
     except subprocess.TimeoutExpired as exc:
         logger.warning("Evaluation timed out: %s", exc)
         return _error_result("timeout", str(exc))
@@ -755,11 +833,45 @@ def _recreate_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _cleanup_db_dir_if_requested(eval_config: dict[str, Any], db_dir: Path) -> None:
+def _remove_db_dir_for_checkpoint(path: Path) -> None:
+    """Remove scratch dir only; do not mkdir (RocksDB checkpoint requires absent dir)."""
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _config_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _resolve_repo_relative_path(raw: str) -> Path:
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = _cmake_workspace_root() / p
+    return p.resolve()
+
+
+def _cleanup_db_dir_if_requested(
+    eval_config: dict[str, Any],
+    db_dir: Path,
+    *,
+    protected_roots: frozenset[Path] | None = None,
+) -> None:
     cleanup = eval_config.get("cleanup_db_dir", True)
-    if bool(cleanup):
-        shutil.rmtree(db_dir, ignore_errors=True)
-        logger.info("Removed database directory %s (cleanup_db_dir=true)", db_dir)
-    else:
-        logger.info("Leaving database directory %s in place (cleanup_db_dir=false)", db_dir)
+    if not bool(cleanup):
+        logger.info(
+            "Leaving database directory %s in place (cleanup_db_dir=false)", db_dir
+        )
+        return
+    roots = protected_roots if protected_roots is not None else frozenset()
+    try:
+        remove_checkpoint_tree(db_dir, protected_roots=roots, ignore_errors=True)
+    except ValueError as exc:
+        logger.warning("Skipping database directory cleanup: %s", exc)
+        return
+    logger.info("Removed database directory %s (cleanup_db_dir=true)", db_dir)
 
