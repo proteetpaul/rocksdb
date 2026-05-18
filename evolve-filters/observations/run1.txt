@@ -1,0 +1,128 @@
+OpenEvolve run1 observations from llm_responses.txt
+
+Summary
+-------
+The LLM responses converged on a small set of plausible RocksDB Bloom filter
+policy ideas, but the run did not meaningfully evaluate those ideas. The main
+failure was diff-format compliance: the model usually returned prose, partial
+snippets, malformed SEARCH/REPLACE markers, or truncated code instead of a
+complete parseable diff. As a result, generated iterations were discarded before
+candidate source files could be installed, built, or benchmarked.
+
+Repeated technical themes
+-------------------------
+1. Make ComputeBitsPerKey level-aware.
+   The most common suggestion was to use FilterBuildingContext, especially
+   level_at_creation and is_bottommost. The model repeatedly argued that L0/L1
+   SSTs are checked more frequently and therefore deserve more bits/key, while
+   bottommost files can often use fewer bits/key to save memory.
+
+2. Keep or simplify the observed false-positive feedback loop.
+   Many responses preserved the baseline idea of deriving an observed full-filter
+   false-positive rate from BLOOM_FILTER_FULL_POSITIVE,
+   BLOOM_FILTER_FULL_TRUE_POSITIVE, and BLOOM_FILTER_USEFUL. Some responses
+   suggested replacing the direct inverse-FP estimate with a simpler threshold
+   or target-FP adjustment.
+
+3. Remove telemetry overhead from the evolved function.
+   The model repeatedly proposed removing std::chrono timing and
+   reportTimeToHistogram calls from ComputeBitsPerKey. The reasoning was that
+   throughput is the primary fitness metric and the timing code adds work to the
+   filter build path. This is plausible for raw throughput but removes useful
+   instrumentation for the experiment.
+
+4. Shorten the evolve block.
+   The prompt feedback repeatedly mentioned that the code exceeded a 500
+   character guideline. The LLM responded by trying to collapse the logic into
+   compact heuristics, often at the cost of clarity and sometimes correctness.
+
+5. Explore heuristic constants.
+   Several snippets proposed small adjustments such as +1.0, +1.5, or +2.0
+   bits/key for hot levels and -0.5 for bottommost files. These are reasonable
+   search knobs, but none were validated because the diffs did not parse.
+
+Contradictions and weak reasoning
+---------------------------------
+The model was not consistent about bottommost files. Most responses suggested
+reducing bits/key on bottommost files to save memory, but a few suggested
+increasing bottommost bits/key because most data lives there. Both can be
+defensible under different workloads, but the responses did not ground the
+choice in measured benchmark behavior.
+
+The L0/L1 assumption is plausible but workload-dependent. L0 is often hot for
+point lookups, but the benchmark's compaction state and lookup mix should decide
+whether adding bits there helps. The responses mostly asserted this rather than
+deriving it from artifacts.
+
+Some responses correctly noticed a conceptual issue with the baseline feedback
+loop: estimating the bits/key that would explain the current observed FP rate is
+not necessarily the same as choosing bits/key that moves the system toward a
+better target FP rate.
+
+Diff-format failures
+--------------------
+The LLM frequently failed to produce complete OpenEvolve SEARCH/REPLACE blocks.
+Observed failure modes included:
+
+- Pure reasoning with no diff.
+- Markdown code fences around incomplete content.
+- Malformed markers such as <<<<<< SEARCH or <<<<< SEARCH.
+- Standalone fragments such as REPLACE, thought, return clamped;, or partial
+  expressions.
+- SEARCH blocks without a matching ======= and >>>>>>> REPLACE.
+- Snippets cut off mid-expression or mid-function.
+- SEARCH text that likely would not exactly match the current program even if
+  the block had parsed.
+
+OpenEvolve's parser requires the exact marker sequence:
+
+<<<<<<< SEARCH
+<exact original text>
+=======
+<replacement text>
+>>>>>>> REPLACE
+
+Because malformed responses do not produce diff blocks, OpenEvolve discards the
+iteration before evaluation.
+
+Likely causes
+-------------
+The prompt encouraged long reasoning with "explain your reasoning thoroughly",
+while the parser needed strict machine-readable diffs. The request also included
+a large amount of context: full current program, top program, metrics, history,
+system instructions, and diff instructions. In the logged API calls, max_tokens
+was 4096 despite config.yaml listing 100000, which may have contributed to
+truncated responses. The 60 second API timeout does not appear to be the cause:
+the API calls returned HTTP 200 responses before timing out.
+
+Promising candidate family to test
+----------------------------------
+A conservative first candidate would keep the baseline observed-FP estimate, add
+small bounded level-aware adjustments, and always clamp:
+
+- Start from the existing stats-derived bits/key.
+- Add a modest bonus for level_at_creation == 0, and possibly level 1.
+- Apply a small penalty or separate variant for is_bottommost to explore memory
+  savings.
+- Avoid locks and loops.
+- Keep numeric guards around divisions/logs.
+- Decide explicitly whether to retain timing instrumentation for experiment
+  visibility.
+
+Recommended fixes before rerunning
+----------------------------------
+1. Tighten the diff prompt:
+   "Return only one complete SEARCH/REPLACE diff block. Do not include prose,
+   markdown fences, explanations, or partial snippets."
+
+2. Remove or weaken "explain your reasoning thoroughly" for diff-based runs.
+
+3. Add a repair retry: if no diff parses, reprompt with the invalid response and
+   ask the model to convert it into a valid diff only.
+
+4. Preserve failed LLM responses as structured artifacts, not just logs, so the
+   next prompt or analysis tooling can inspect them.
+
+5. Verify the effective model config. The actual calls used max_tokens=4096; if
+   larger outputs are intended, make sure the model-specific config is receiving
+   the intended value.

@@ -46,6 +46,10 @@ prompt:
   num_top_programs: 3         # Best performers
   num_diverse_programs: 2     # Creative exploration
   include_artifacts: true     # Execution feedback
+  suggest_simplification_after_chars: 10000
+  include_changes_under_chars: 10000
+  concise_implementation_max_lines: 200
+  diff_summary_max_lines: 200
   system_message: |-
     You are an expert systems programmer who is well-versed in C++. You are evolving RocksDB Bloom filter policy logic inside the EVOLVE block in the given source code, specifically `ComputeBitsPerKey(const FilterBuildingContext&)`.
 
@@ -56,12 +60,13 @@ prompt:
     - Latency and resource metrics (lower is usually better when comparing at similar throughput): `read_p99_us`, `write_p99_us`, `filter_memory_usage_total` (estimated live SST filter bytes from table properties).
     - Per-level SST filter bytes may also appear as `filter_memory_usage.level.0`, `filter_memory_usage.level.1`, and so on.
     - Additional keys may appear from Bloom and filter telemetry (for example `rocksdb.bloom.filter.*`, `bloom.full.observed_fp_rate`, `bloom.full.false_positive.count`, `rocksdb.compute.bits.per.key.micros.*`). Use them as secondary signals for filter quality and `ComputeBitsPerKey` overhead.
+    - Block cache aggregate tickers from RocksDB statistics (when enabled): `rocksdb.block.cache.hit.count`, `rocksdb.block.cache.miss.count` (correspond to `BLOCK_CACHE_HIT` / `BLOCK_CACHE_MISS`).
 
     MAP-Elites feature dimensions (diversity grid)
     - OpenEvolve bins programs using: `read_p99_us`, `throughput_qps`, `write_p99_us`, `filter_memory_usage_total` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same tail latency or memory cell.
 
     Artifacts (when `include_artifacts` is enabled)
-    - Success (`artifacts.status` / `status` = `ok`): expect paths and run metadata such as `runtime_config_path`, `evolved_source_path`, `memory_limit`, `db_bench_path`, `db_dir`, and a large `log` string (full db_bench output). Use the log for concrete errors, tail latencies, and Bloom lines; do not paste it back verbatim in a diff.
+    - Success (`artifacts.status` / `status` = `ok`): paths and run metadata only (`runtime_config_path`, `evolved_source_path`, `memory_limit`, `db_bench_path`, `db_dir`). The `log` field is intentionally empty: the evaluator parses db_bench stdout and puts throughput, tail latencies, Bloom/statistics-derived fields, block cache hit/miss counts, and live SST filter bytes into the numeric metrics above—use those for performance and filter behavior, not a raw log.
     - `evolved_source_install_failed`: candidate file could not be installed; check `error_message` / `error_type`.
     - `rocksdb_cmake_failed`: build failed; artifacts may include `cmake_stdout`, `cmake_stderr`, `build_stdout`, `build_stderr`, `build_directory`, `error_type`, `error_message`.
     - `load_failed` / `run_failed`: db_bench phase failed; `load_return_code` or `run_return_code` may be present. Partial output may still appear in the artifact payload depending on failure path.
@@ -87,7 +92,7 @@ prompt:
     - Do not take locks or introduce synchronization in this function.
     - Preserve memory safety: no unsafe ownership patterns; rely on existing smart-pointer based ownership.
     - Guard all divisions/logs against invalid ranges (division by zero, log of non-positive values, NaN/Inf propagation).
-    - Keep output within `ClampBitsPerKey()` bounds.
+    - NaN/Inf and extreme magnitudes are handled when selecting the delegate: `NewBloomFilterPolicy` applies the same bits/key sanitization as other RocksDB Bloom policies (for example values below 0.5 bits/key mean no filter; non-finite values are capped per `BloomLikeFilterPolicy`).
     - Keep changes localized to the evolve block unless absolutely required for compilation.
 
     Information available
@@ -98,10 +103,12 @@ prompt:
       - `BLOOM_FILTER_PREFIX_CHECKED`: number of prefix filter checks.
       - `BLOOM_FILTER_PREFIX_USEFUL`: prefix checks that avoided reads.
       - `BLOOM_FILTER_PREFIX_TRUE_POSITIVE`: prefix checks that ended with true hit.
-      - `NUMBER_DB_SEEK`: seek-heavy workload indicator.
-      - `NUMBER_DB_NEXT`: forward-iteration pressure indicator.
-      - `NUMBER_DB_PREV`: reverse-iteration pressure indicator.
-      - `NUMBER_KEYS_READ`: overall read-intensity indicator.
+      - `NUMBER_DB_SEEK`: Number of calls to seek.
+      - `NUMBER_DB_NEXT`: Number of calls to next.
+      - `NUMBER_DB_PREV`: Number of calls to prev.
+      - `NUMBER_KEYS_READ`: Number of keys read
+      - `BLOCK_CACHE_MISS`: Total block cache misses
+      - `BLOCK_CACHE_HIT`: Total block cache hits
     - `FilterBuildingContext` definition:
       struct FilterBuildingContext {
         // This constructor is for internal use only and subject to change.
@@ -143,5 +150,5 @@ prompt:
     - Starts near 9.9 bits/key.
     - Estimates observed full-filter FP behavior from bloom counters.
     - Converts FP estimate into bits/key using `bits ~= -ln(fp) / (ln(2)^2)`.
-    - Returns clamped result.
+    - Returns raw bits/key from the EVOLVE logic; `GetOrCreateDelegate` passes it to `NewBloomFilterPolicy`, which applies RocksDB's standard bits/key sanitization.
 
