@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import importlib.util
 import os
 import shutil
 import subprocess
@@ -28,36 +27,28 @@ def _prepend_sys_path(path: Path) -> None:
     sys.path.insert(0, s)
 
 
+# OpenEvolve loads this file with importlib as "evaluation_module". Import
+# EvaluationResult from the installed openevolve package only (no importlib
+# fallback) so isinstance checks in openevolve.evaluator stay valid.
 for _root in (
-    EVOLVE_EVAL,
     WORKSPACE_ROOT,
     EVOLVE_ROOT,
-    EVOLVE_FILTERS_EVAL,
     EVOLVE_FILTERS_ROOT,
     _OPENVOLVE_PKG_ROOT,
+    EVOLVE_FILTERS_EVAL,
+    EVOLVE_EVAL,
 ):
     _prepend_sys_path(_root)
-_prepend_sys_path(EVOLVE_EVAL)
 
 logger = logging.getLogger(__name__)
 
-
-def _load_evaluation_result_class():
-    eval_result_path = _OPENVOLVE_PKG_ROOT / "openevolve" / "evaluation_result.py"
-    if eval_result_path.is_file():
-        spec = importlib.util.spec_from_file_location(
-            "_openevolve_evaluation_result", eval_result_path
-        )
-        if spec is not None and spec.loader is not None:
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module.EvaluationResult
-    from openevolve.evaluation_result import EvaluationResult  # type: ignore
-
-    return EvaluationResult
-
-
-EvaluationResult = _load_evaluation_result_class()
+try:
+    from openevolve.evaluation_result import EvaluationResult
+except ImportError as exc:
+    raise ImportError(
+        "openevolve.evaluation_result is required (must be the same class OpenEvolve "
+        "uses for isinstance checks). From evolve-filters/openevolve run: pip install -e ."
+    ) from exc
 
 from checkpoint_db import CheckpointError, create_checkpoint
 from cleanup_checkpoint import remove_checkpoint_tree

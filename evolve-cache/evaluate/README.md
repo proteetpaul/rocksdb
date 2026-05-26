@@ -4,6 +4,11 @@ This directory provides an OpenEvolve-compatible `evaluate(program_path)` that
 runs a RocksDB db_bench load + workload sequence with tiered block cache and
 cache tier controller enabled.
 
+Requires the vendored OpenEvolve package (`pip install -e` from
+`evolve-filters/openevolve`); the evaluator imports
+`openevolve.evaluation_result.EvaluationResult` and fails at import time if
+OpenEvolve is not installed.
+
 ## Required environment variables
 
 - `OPENEVOLVE_EVAL_CONFIG`: path to evaluator runtime JSON config (optional if

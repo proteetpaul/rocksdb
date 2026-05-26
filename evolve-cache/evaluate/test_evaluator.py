@@ -20,6 +20,17 @@ for path in (EVOLVE_CACHE_EVAL, WORKSPACE_ROOT, EVOLVE_CACHE_ROOT):
     if s not in sys.path:
         sys.path.insert(0, s)
 
+_OPENVOLVE_ROOT = WORKSPACE_ROOT / "evolve-filters" / "openevolve"
+if str(_OPENVOLVE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_OPENVOLVE_ROOT))
+
+try:
+    from openevolve.evaluation_result import EvaluationResult  # noqa: F401
+except ImportError as exc:
+    raise unittest.SkipTest(
+        "openevolve not installed; run: pip install -e evolve-filters/openevolve"
+    ) from exc
+
 import importlib.util
 
 _spec = importlib.util.spec_from_file_location(
@@ -280,6 +291,11 @@ class TestOpenEvolveCacheEvaluator(unittest.TestCase):
                 self.assertEqual(
                     flags["compressed_secondary_cache_size"], want_secondary
                 )
+
+    def test_evaluation_result_is_openevolve_class(self) -> None:
+        from openevolve.evaluation_result import EvaluationResult as OpenEvolveResult
+
+        self.assertIs(evaluator.EvaluationResult, OpenEvolveResult)
 
     def test_eval_db_bench_flags_parses_cache_size_suffixes(self) -> None:
         flags = evaluator._eval_db_bench_flags(

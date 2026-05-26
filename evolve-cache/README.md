@@ -8,7 +8,12 @@ Evolve `HitRateGhostPolicy::ComputeSecondaryRatio` in [`cache/hit_rate_ghost_pol
 - Python 3.10+
 - `systemd-run` (evaluator applies cgroup `MemoryMax` limits)
 - Built or buildable RocksDB via CMake under `<repo>/build/`
-- OpenEvolve vendored under [`../evolve-filters/openevolve`](../evolve-filters/openevolve)
+- OpenEvolve vendored under [`../evolve-filters/openevolve`](../evolve-filters/openevolve), installed into your Python env:
+
+```bash
+cd evolve-filters/openevolve
+pip install -e .
+```
 
 ## Environment
 
