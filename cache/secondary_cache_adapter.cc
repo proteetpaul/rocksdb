@@ -8,6 +8,7 @@
 #include <atomic>
 
 #include "cache/tiered_secondary_cache.h"
+#include "monitoring/active_get_context_scope.h"
 #include "monitoring/perf_context_imp.h"
 #include "test_util/sync_point.h"
 #include "util/cast_util.h"
@@ -184,22 +185,8 @@ Cache::Handle* CacheWithSecondaryAdapter::Promote(
     // Nothing found.
     return nullptr;
   }
-  // Found something.
-  switch (helper->role) {
-    case CacheEntryRole::kFilterBlock:
-      RecordTick(stats, SECONDARY_CACHE_FILTER_HITS);
-      break;
-    case CacheEntryRole::kIndexBlock:
-      RecordTick(stats, SECONDARY_CACHE_INDEX_HITS);
-      break;
-    case CacheEntryRole::kDataBlock:
-      RecordTick(stats, SECONDARY_CACHE_DATA_HITS);
-      break;
-    default:
-      break;
-  }
-  PERF_COUNTER_ADD(secondary_cache_hit_count, 1);
-  RecordTick(stats, SECONDARY_CACHE_HITS);
+  // User Get/MultiGet only: batch secondary hit tickers via active GetContext.
+  RecordSecondaryCacheHitForUserGet(stats, helper->role);
 
   // Note: SecondaryCache::Size() is really charge (from the CreateCallback)
   size_t charge = secondary_handle->Size();
@@ -746,5 +733,60 @@ Status UpdateTieredCache(const std::shared_ptr<Cache>& cache,
     s = tiered_cache->UpdateAdmissionPolicy(adm_policy);
   }
   return s;
+}
+
+Status UpdateCacheTierSplit(const std::shared_ptr<Cache>& cache,
+                            double secondary_ratio, int64_t total_budget) {
+  if (!cache) {
+    return Status::InvalidArgument("cache is null");
+  }
+  if (!strcmp(cache->Name(), kTieredCacheName)) {
+    return Status::NotSupported(
+        "UpdateCacheTierSplit does not apply to TieredCache; use "
+        "UpdateTieredCache");
+  }
+  if (secondary_ratio < 0.0 || secondary_ratio > 1.0) {
+    return Status::InvalidArgument("secondary_ratio out of range");
+  }
+
+  auto* adapter =
+      static_cast_with_check<CacheWithSecondaryAdapter>(cache.get());
+  if (adapter == nullptr) {
+    return Status::NotSupported("cache is not CacheWithSecondaryAdapter");
+  }
+
+  size_t sec_capacity = 0;
+  Status s = adapter->GetSecondaryCacheCapacity(sec_capacity);
+  if (!s.ok()) {
+    return s;
+  }
+
+  Cache* primary = adapter->TEST_GetCache();
+  const size_t pri_capacity = primary->GetCapacity();
+  size_t total = total_budget > 0 ? static_cast<size_t>(total_budget)
+                                    : pri_capacity + sec_capacity;
+  if (total == 0) {
+    return Status::InvalidArgument("total cache budget is zero");
+  }
+
+  const size_t new_sec_capacity =
+      static_cast<size_t>(static_cast<double>(total) * secondary_ratio);
+  const size_t new_pri_capacity = total - new_sec_capacity;
+
+  SecondaryCache* secondary = adapter->TEST_GetSecondaryCache();
+  if (new_sec_capacity < sec_capacity) {
+    s = secondary->SetCapacity(new_sec_capacity);
+    if (!s.ok()) {
+      return s;
+    }
+    primary->SetCapacity(new_pri_capacity);
+  } else {
+    primary->SetCapacity(new_pri_capacity);
+    s = secondary->SetCapacity(new_sec_capacity);
+    if (!s.ok()) {
+      return s;
+    }
+  }
+  return Status::OK();
 }
 }  // namespace ROCKSDB_NAMESPACE

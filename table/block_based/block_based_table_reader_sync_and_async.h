@@ -6,6 +6,7 @@
 
 #include "util/async_file_reader.h"
 #include "util/coro_utils.h"
+#include "monitoring/active_get_context_scope.h"
 
 #if defined(WITHOUT_COROUTINES) || \
     (defined(USE_COROUTINES) && defined(WITH_COROUTINES))
@@ -294,6 +295,9 @@ DEFINE_SYNC_AND_ASYNC(void, BlockBasedTable::MultiGet)
     assert(false);
     CO_RETURN;  // Nothing to do
   }
+
+  GetContext* active_get_context = mget_range->begin()->get_context;
+  ActiveGetContextScope active_get_context_scope(active_get_context);
 
   FilterBlockReader* const filter =
       !skip_filters ? rep_->filter.get() : nullptr;

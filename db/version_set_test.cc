@@ -529,6 +529,25 @@ TEST_F(VersionStorageInfoTest, EstimateLiveDataSize2) {
   ASSERT_EQ(4U, vstorage_.EstimateLiveDataSize());
 }
 
+TEST_F(VersionStorageInfoTest, GetAccumulatedRawBytes) {
+  Add(1, 1U, "4", "7", 1U);
+  Add(2, 2U, "3", "5", 1U);
+  UpdateVersionStorageInfo();
+  FileMetaData* f1 = vstorage_.GetFileMetaDataByNumber(1U);
+  FileMetaData* f2 = vstorage_.GetFileMetaDataByNumber(2U);
+  ASSERT_NE(f1, nullptr);
+  ASSERT_NE(f2, nullptr);
+  f1->raw_key_size = 100;
+  f1->raw_value_size = 400;
+  f1->init_stats_from_file = true;
+  f2->raw_key_size = 50;
+  f2->raw_value_size = 150;
+  f2->init_stats_from_file = true;
+  vstorage_.UpdateAccumulatedStats(f1);
+  vstorage_.UpdateAccumulatedStats(f2);
+  ASSERT_EQ(700U, vstorage_.GetAccumulatedRawBytes());
+}
+
 TEST_F(VersionStorageInfoTest, SingleLevelBottommostData) {
   // In case of a single level, the oldest L0 file is bottommost. This could be
   // improved in case the L0 files cover disjoint key-ranges.

@@ -77,7 +77,7 @@ FilterBitsReader* EvolveDummyFilterPolicy::GetFilterBitsReader(
 
 // EVOLVE-BLOCK-START
 double EvolveDummyFilterPolicy::ComputeBitsPerKey(
-    const FilterBuildingContext& context) const {
+    const FilterBuildingContext& /*context*/) const {
   double stats_based_bits = 9.9;
 
   if (statistics_ != nullptr) {

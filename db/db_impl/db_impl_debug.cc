@@ -9,6 +9,7 @@
 #ifndef NDEBUG
 #include <iostream>
 
+#include "cache/cache_tier_memory_controller.h"
 #include "db/blob/blob_file_cache.h"
 #include "db/column_family.h"
 #include "db/db_impl/db_impl.h"
@@ -307,6 +308,33 @@ void DBImpl::TEST_WaitForPeriodicTaskRun(std::function<void()> callback) const {
 
 const PeriodicTaskScheduler& DBImpl::TEST_GetPeriodicTaskScheduler() const {
   return periodic_task_scheduler_;
+}
+
+size_t DBImpl::TEST_CacheTierControllerSnapshotCount() const {
+  if (cache_tier_memory_controller_ == nullptr) {
+    return 0;
+  }
+  return cache_tier_memory_controller_->TEST_NumSnapshots();
+}
+
+uint64_t DBImpl::TEST_CacheTierControllerLastActiveSstRawBytes() const {
+  if (cache_tier_memory_controller_ == nullptr ||
+      cache_tier_memory_controller_->TEST_NumSnapshots() == 0) {
+    return 0;
+  }
+  const size_t n = cache_tier_memory_controller_->TEST_NumSnapshots();
+  return cache_tier_memory_controller_->TEST_SnapshotAt(n - 1)
+      .active_sst_raw_bytes;
+}
+
+uint64_t DBImpl::TEST_CacheTierControllerLastSecondaryMissCount() const {
+  if (cache_tier_memory_controller_ == nullptr ||
+      cache_tier_memory_controller_->TEST_NumSnapshots() == 0) {
+    return 0;
+  }
+  const size_t n = cache_tier_memory_controller_->TEST_NumSnapshots();
+  return cache_tier_memory_controller_->TEST_SnapshotAt(n - 1)
+      .secondary_miss_count;
 }
 
 SeqnoToTimeMapping DBImpl::TEST_GetSeqnoToTimeMapping() const {

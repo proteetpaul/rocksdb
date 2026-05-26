@@ -77,6 +77,7 @@ class ArenaWrappedDBIter;
 class InMemoryStatsHistoryIterator;
 class MemTable;
 class PersistentStatsHistoryIterator;
+class CacheTierMemoryController;
 class TableCache;
 class TaskLimiterToken;
 class Version;
@@ -1269,6 +1270,10 @@ class DBImpl : public DB {
 
   const PeriodicTaskScheduler& TEST_GetPeriodicTaskScheduler() const;
 
+  size_t TEST_CacheTierControllerSnapshotCount() const;
+  uint64_t TEST_CacheTierControllerLastActiveSstRawBytes() const;
+  uint64_t TEST_CacheTierControllerLastSecondaryMissCount() const;
+
   static Status TEST_ValidateOptions(const DBOptions& db_options) {
     return ValidateOptions(db_options);
   }
@@ -1297,6 +1302,12 @@ class DBImpl : public DB {
   // This function checks and schedules available compactions and will run
   // periodically.
   void TriggerPeriodicCompaction();
+
+  void SampleCacheTierStats();
+  void AdjustCacheTierMemory();
+  std::shared_ptr<Cache> GetBlockCacheShared();
+  // REQUIRES: DB mutex held. CF whose block cache is cache_tier_block_cache_.
+  ColumnFamilyData* GetCacheTierColumnFamilyData();
 
   // REQUIRES: DB mutex held
   std::pair<SequenceNumber, uint64_t> GetSeqnoToTimeSample() const;
@@ -3182,6 +3193,9 @@ class DBImpl : public DB {
 
   // It contains the implementations for each periodic task.
   std::map<PeriodicTaskType, const PeriodicTaskFunc> periodic_task_functions_;
+
+  std::unique_ptr<CacheTierMemoryController> cache_tier_memory_controller_;
+  std::shared_ptr<Cache> cache_tier_block_cache_;
 
   // When set, we use a separate queue for writes that don't write to memtable.
   // In 2PC these are the writes at Prepare phase.

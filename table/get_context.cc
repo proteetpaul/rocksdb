@@ -217,6 +217,14 @@ void GetContext::ReportCounters() {
     RecordTick(statistics_, BLOCK_CACHE_COMPRESSION_DICT_BYTES_INSERT,
                get_context_stats_.num_cache_compression_dict_bytes_insert);
   }
+  if (get_context_stats_.num_secondary_cache_hits > 0) {
+    RecordTick(statistics_, SECONDARY_CACHE_HITS,
+               get_context_stats_.num_secondary_cache_hits);
+  }
+  if (get_context_stats_.num_compressed_secondary_dummy_hits > 0) {
+    RecordTick(statistics_, COMPRESSED_SECONDARY_CACHE_DUMMY_HITS,
+               get_context_stats_.num_compressed_secondary_dummy_hits);
+  }
 }
 
 bool GetContext::SaveValue(const ParsedInternalKey& parsed_key,

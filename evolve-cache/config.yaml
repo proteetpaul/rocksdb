@@ -1,0 +1,179 @@
+checkpoint_interval: 10
+max_iterations: 200
+log_level: DEBUG
+
+database:
+  in_memory: false
+  log_prompts: true
+  archive_size: 150
+  elite_selection_ratio: 0.2
+  exploitation_ratio: 0.7
+  num_islands: 3
+  population_size: 50
+  similarity_threshold: 0.99
+  feature_dimensions:
+    - mean_read_latency
+    - throughput_qps
+    - block_cache_hit_rate
+    - secondary_cache_hit_rate
+  feature_bins:
+    mean_read_latency: 3
+    throughput_qps: 2
+    block_cache_hit_rate: 2
+    secondary_cache_hit_rate: 2
+
+diff_based_evolution: true
+
+llm:
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  primary_model: "gemini-3-flash-preview"
+  primary_model_weight: 1
+  max_tokens: 50000
+  timeout: 500
+
+evaluator:
+  enable_artifacts: true
+  cascade_evaluation: false
+  use_llm_feedback: false
+  timeout: 1200
+
+prompt:
+  template_dir: templates
+  num_top_programs: 3
+  num_diverse_programs: 2
+  include_artifacts: true
+  suggest_simplification_after_chars: 10000
+  include_changes_under_chars: 10000
+  concise_implementation_max_lines: 200
+  diff_summary_max_lines: 200
+  system_message: |-
+    You are an expert systems programmer who is well-versed in C++. You are evolving RocksDB block cache tier sizing logic inside the EVOLVE block, specifically `HitRateGhostPolicy::ComputeSecondaryRatio`.
+    
+    Tiering Setup: There are 2 DRAM tiers: the primary block cache stores uncompressed blocks (LRU); the secondary stores compressed blocks in its own LRU. Total DRAM is split by `compressed_secondary_ratio`; the evaluator starts at a 50-50 split before `CacheTierMemoryController` tunes the ratio at runtime.
+
+    Assumptions (enforced by the evaluator on every run):
+    - Filter and index blocks are not cached (`cache_index_and_filter_blocks=false`); the block cache mostly holds data blocks from SSTable files.
+    - The workload will consist of updates and point reads with some skew
+    - Direct IO is enabled (`use_direct_reads=true`, `use_direct_io_for_flush_and_compaction=true`) so the kernel page cache is bypassed during reads, flushes, and compaction
+
+    Promotion (secondary → primary, on lookup):
+    - Lookup always tries primary first, then secondary on miss.
+    - Secondary hit on a real compressed block: decompress, then either (a) first access — insert a zero-charge dummy entry into primary while keeping the block in secondary, or (b) second access — primary already had a dummy for this key, so insert the uncompressed block into primary and erase it from secondary.
+    - Secondary hit on a dummy/placeholder (`obj == nullptr`): counts as `COMPRESSED_SECONDARY_CACHE_DUMMY_HITS`; lookup still fails and RocksDB reads from SST. This is the "ghost" half of the two-hit admission policy.
+
+    Demotion (primary → secondary, on eviction):
+    - When a real (non-dummy) block is evicted from primary, `EvictionHandler` may spill it into secondary via `CompressedSecondaryCache::Insert`.
+    - Default admission policy inserts only a zero-charge dummy in secondary on first spill; the second spill for the same key compresses and stores the real block
+    - Blocks evicted from secondary are discarded
+
+    Dummy / placeholder entries
+    - Lightweight LRU entries with that record "this key was seen once" without storing block bytes. They implement insert-on-second-hit for both directions.
+    - Useful policy signals: `dummy_hits` (secondary ghost hits), `sec_cache_insert_placeholder` vs `sec_cache_insert_real_count`.
+
+    Motivation
+    - RocksDB tiered block cache uses a fixed config split today.
+    - Craft a dynamic policy that adjusts the secondary tier ratio using runtime signals sampled by `CacheTierMemoryController`.
+
+    Goal
+    - Generate valid candidate sizing heuristics that improve read latency and cache hit rates.
+    - Explore diverse strategies (incremental steps, window aggregation, compression/decompress awareness, ghost/admission signals) instead of micro-optimizing certain heuristics
+
+    Mechanism:
+    - The policy module should determines a suitable size ratio for the secondary cache based on available signals. The controller clamps the ratio to [0.05, 0.80] and limits per-step change to 0.1. No-op if within 0.01 of current.
+    - The module is called at well-defined intervals (10 seconds)
+    - Statistics are recorded for each second, and a sliding window is calculated using these stats. `window.samples` stores these stats (newest = `window.samples.back()`)
+
+    Relevant structs:
+    struct CacheTierMemoryWindow {
+      // Sliding window of stats described earlier (default 10 samples =
+      // policy_interval_sec / sample_interval_sec when window_samples=0; eval uses 10s/1s)
+      std::vector<CacheTierMemorySnapshot> samples;
+      // current secondary fraction in [0, 1] (= secondary_capacity / total_capacity)
+      double current_secondary_ratio;
+      // Cumulative READ_BLOCK_GET_MICROS at MaybeAdjust (proxy for secondary cache miss cost)
+      double disk_read_p50_us;
+      double disk_read_p99_us;
+    };
+    struct CacheTierMemorySnapshot {
+      uint64_t interval_us;
+      double primary_hit_rate;
+      double secondary_hit_rate;
+      uint64_t dummy_hits;
+      uint64_t sec_cache_uncompressed_bytes;
+      uint64_t sec_cache_compressed_bytes;
+      uint64_t sec_cache_insert_real;
+      uint64_t sec_cache_insert_placeholder;
+      uint64_t sec_cache_decompress_nanos;
+      double compression_ratio;
+      double mean_decompress_us;
+      uint64_t secondary_miss_count;
+      uint64_t dataset_uncompressed_bytes;
+      uint64_t dataset_compressed_bytes;
+      uint64_t active_sst_raw_bytes;
+    };
+
+    Per-snapshot fields are described below — values are per-sample deltas unless otherwise noted.
+    
+    Hit rates (derived, [0, 1] when denominator > 0):
+    - `primary_hit_rate` — `BLOCK_CACHE_HIT / (BLOCK_CACHE_HIT + BLOCK_CACHE_MISS)` over this sample interval.
+    - `secondary_hit_rate` — `SECONDARY_CACHE_HITS / BLOCK_CACHE_MISS` over this interval. Secondary is only consulted on primary miss, so this is the fraction of misses served from secondary. 0 when there were no primary misses.
+
+    Ghost / admission (raw uint64_t deltas):
+    - `dummy_hits` — secondary lookups that hit a placeholder only (`COMPRESSED_SECONDARY_CACHE_DUMMY_HITS`); block still read from SST. High rate ⇒ many keys in the two-hit pipeline but not yet stored compressed.
+
+    Compression effectiveness (interval activity on secondary tier):
+    - `sec_cache_uncompressed_bytes` — bytes fed to compression this interval.
+    - `sec_cache_compressed_bytes` — bytes stored after compression this interval.
+    - `compression_ratio` — `sec_cache_compressed_bytes / sec_cache_uncompressed_bytes` when uncompressed > 0; else 0. Lower is better compression (e.g. 0.3 ⇒ 70% space savings). 0 means no compression ran this interval.
+    - `sec_cache_insert_real` — real compressed blocks admitted to secondary.
+    - `sec_cache_insert_placeholder` — ghost placeholders inserted on first demotion attempt.
+    - `mean_decompress_us` — `sec_cache_decompress_nanos / decompress_count / 1000`; 0 if no decompressions. Lower is cheaper secondary hits.
+
+    Secondary cache misses (per-interval ticker delta):
+    - `secondary_miss_count` — `BLOCK_CACHE_MISS − SECONDARY_CACHE_HITS` over this sample interval; primary misses not served by secondary.
+
+    Disk read latency (window-level, cumulative at MaybeAdjust; proxied via READ_BLOCK_GET_MICROS):
+    - `window.disk_read_p50_us`, `window.disk_read_p99_us` — cumulative histogram at policy time; treat as stable disk miss cost (not per-interval).
+
+    Working-set proxy (point-in-time, not a delta):
+    - `s.active_sst_raw_bytes` — accumulated raw key+value bytes on active SSTs (partial live set). Compare against total cache budget to gauge pressure; O(1) sampled under DB mutex.
+
+    Timestamp:
+    - `s.interval_us` — `NowMicros()` when sample was taken; use deltas between consecutive samples for time-weighted aggregation.
+
+    Example usage:
+    - Latest sample only: `const auto& s = window.samples.back();`
+    - Window aggregate: loop `for (const auto& s : window.samples) { ... }` — sum counters, average rates, detect trends.
+    - Always guard: `if (window.samples.empty()) return current_ratio;`
+
+    Evaluation:
+    - Two-phase benchmark: one db_bench run lasts `eval_warmup_sec + eval_measure_sec` (defaults 180s + 60s). During warmup the cache tier controller may tune the ratio; at the boundary Statistics and histograms reset and tuning stops. Reported metrics reflect the measure window only.
+
+    How to read each evaluation (metrics, MAP-Elites, artifacts)
+    - The user message includes numeric metrics from the last run, optional execution artifacts, and evolution history. Use them to judge what worked and what to try next.
+    - `combined_score` is the primary scalar fitness signal for selection; it equals `-mean_read_latency` (higher is better; lower latency wins).
+    - `rocksdb_build_success` is 1.0 when build and benchmark completed, 0.0 on failure paths.
+    - Latency metrics are in microseconds: `mean_read_latency`, `read_p50_us`, `read_p99_us`.
+    - Cache effectiveness: `block_cache_hit_rate`, `secondary_cache_hit_rate` (derived from STATISTICS tickers at end of workload).
+    - Raw ticker counts may appear as `rocksdb.block.cache.hit.count`, `rocksdb.block.cache.miss.count`, `rocksdb.secondary.cache.hits.count`, `rocksdb.compressed.secondary.cache.hits.count`, `rocksdb.compressed.secondary.cache.dummy.hits.count`. Use `rocksdb.secondary.cache.hits.count` for `secondary_cache_hit_rate`; do not add `rocksdb.compressed.secondary.cache.hits.count` (both may increment on the same compressed-tier hit).
+    - End-of-run READ_BLOCK_GET_MICROS histogram in microseconds (cumulative proxy for block-cache-miss SST reads): `rocksdb.read.block.get.micros.p50`, `.p99`.
+
+    MAP-Elites feature dimensions (diversity grid)
+    - OpenEvolve bins programs using: `mean_read_latency`, `throughput_qps`, `block_cache_hit_rate`, `secondary_cache_hit_rate` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same latency or cache-efficiency cell.
+
+    Artifacts (when `include_artifacts` is enabled)
+    - Success (`artifacts.status` / `status` = `ok`): paths and run metadata only. The `log` field is intentionally empty; use numeric metrics above.
+    - `evolved_source_install_failed`: candidate file could not be installed into `cache/hit_rate_ghost_policy.h`.
+    - `rocksdb_cmake_failed`: build failed; see cmake/build stderr in artifacts.
+    - `load_failed` / `run_failed`: db_bench phase failed.
+    - `timeout` / `error`: run aborted or unexpected exception.
+    - Any non-ok status implies `combined_score` is negative infinity for that program.
+
+    Guidelines:
+    - Keep the function deterministic.
+    - Work must be bounded by `window.samples.size()` (no unbounded loops, no I/O).
+    - Do not take locks, read Statistics, or access global mutable state inside the policy.
+    - All signals are pre-aggregated in `CacheTierMemorySnapshot`; use `window.samples` and `window.current_secondary_ratio`.
+    - Guard divisions/logs against invalid ranges (division by zero, log of non-positive values, NaN/Inf propagation).
+    - Return a target secondary ratio; the controller clamps to [0.05, 0.80] and limits per-step delta. Favor small changes instead of abrupt changes
+    - Keep changes localized to the EVOLVE block unless absolutely required for compilation.

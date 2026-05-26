@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "rocksdb/compression_type.h"
 #include "rocksdb/data_structure.h"
@@ -559,4 +560,65 @@ Status UpdateTieredCache(
     const std::shared_ptr<Cache>& cache, int64_t total_capacity = -1,
     double compressed_secondary_ratio = std::numeric_limits<double>::max(),
     TieredAdmissionPolicy adm_policy = TieredAdmissionPolicy::kAdmPolicyMax);
+
+// EXPERIMENTAL
+// Adjust primary vs compressed-secondary split for stacked block cache
+// (LRU/HyperClock + CompressedSecondaryCache with distribute_cache_res=false).
+// Keeps total_budget = primary_capacity + secondary_capacity unless
+// total_budget > 0. Does not apply to TieredCache; use UpdateTieredCache.
+Status UpdateCacheTierSplit(const std::shared_ptr<Cache>& cache,
+                            double secondary_ratio,
+                            int64_t total_budget = -1);
+
+struct CacheTierMemorySnapshot {
+  uint64_t interval_us = 0;
+  double primary_hit_rate = 0.0;
+  double secondary_hit_rate = 0.0;
+  uint64_t dummy_hits = 0;
+  // Per-interval compressed-secondary perf (aggregated PerfContext-aligned).
+  uint64_t sec_cache_uncompressed_bytes = 0;
+  uint64_t sec_cache_compressed_bytes = 0;
+  uint64_t sec_cache_insert_real = 0;
+  uint64_t sec_cache_insert_placeholder = 0;
+  uint64_t sec_cache_decompress_nanos = 0;
+  double compression_ratio = 0.0;
+  double mean_decompress_us = 0.0;
+  // Per-interval: primary misses not served by secondary.
+  uint64_t secondary_miss_count = 0;
+  // Point-in-time footprint in compressed-secondary (logical + stored bytes).
+  uint64_t dataset_uncompressed_bytes = 0;
+  uint64_t dataset_compressed_bytes = 0;
+  // Partial logical SST payload (accumulated raw key+value); see evolve-cache/thoughts.md.
+  // Not sampled via EstimateLiveDataSize / live-sst-files-size (latency + SST I/O).
+  uint64_t active_sst_raw_bytes = 0;
+};
+
+struct CacheTierMemoryWindow {
+  std::vector<CacheTierMemorySnapshot> samples;
+  double current_secondary_ratio = 0.0;
+  // Cumulative READ_BLOCK_GET_MICROS at MaybeAdjust (proxy for disk miss cost).
+  double disk_read_p50_us = 0.0;
+  double disk_read_p99_us = 0.0;
+};
+
+class CacheTierMemoryPolicy {
+ public:
+  virtual ~CacheTierMemoryPolicy() = default;
+  virtual double ComputeSecondaryRatio(const CacheTierMemoryWindow& window,
+                                       double current_ratio) = 0;
+};
+
+struct CacheTierControllerOptions {
+  bool enabled = false;
+  uint64_t sample_interval_sec = 1;
+  uint64_t policy_interval_sec = 10;
+  uint64_t window_samples = 0;
+  uint64_t warmup_time_sec = 10;
+  uint32_t min_policy_intervals = 2;
+  uint64_t min_cache_lookups = 10000;
+  double max_ratio_delta_per_step = 0.1;
+  // Stop MaybeAdjust after this many seconds from controller start (0 = unlimited).
+  uint64_t tuning_duration_sec = 0;
+  std::shared_ptr<CacheTierMemoryPolicy> policy;
+};
 }  // namespace ROCKSDB_NAMESPACE

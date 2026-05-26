@@ -10,6 +10,7 @@ LIB_SOURCES =                                                   \
   cache/lru_cache.cc                                            \
   cache/compressed_secondary_cache.cc                           \
   cache/secondary_cache.cc                                      \
+  cache/cache_tier_memory_controller.cc                         \
   cache/secondary_cache_adapter.cc                              \
   cache/sharded_cache.cc                                        \
   cache/tiered_secondary_cache.cc                               \
@@ -148,6 +149,7 @@ LIB_SOURCES =                                                   \
   memtable/write_buffer_manager.cc                              \
   monitoring/histogram.cc                                       \
   monitoring/histogram_windowing.cc                             \
+  monitoring/active_get_context_scope.cc                        \
   monitoring/in_memory_stats_history.cc                         \
   monitoring/instrumented_mutex.cc                              \
   monitoring/iostats_context.cc                                 \
@@ -466,6 +468,7 @@ BENCH_MAIN_SOURCES =                                                    \
 TEST_MAIN_SOURCES =                                                     \
   cache/cache_test.cc                                                   \
   cache/cache_reservation_manager_test.cc                               \
+  cache/cache_tier_memory_controller_test.cc                            \
   cache/compressed_secondary_cache_test.cc                              \
   cache/lru_cache_test.cc                                               \
   cache/tiered_secondary_cache_test.cc					                        \
@@ -495,6 +498,7 @@ TEST_MAIN_SOURCES =                                                     \
   db/cuckoo_table_db_test.cc                                            \
   db/db_basic_test.cc                                                   \
   db/db_block_cache_test.cc                                             \
+  db/db_cache_tier_controller_test.cc                                    \
   db/db_bloom_filter_test.cc                                            \
   db/db_compaction_abort_test.cc                                        \
   db/db_compaction_filter_test.cc                                       \

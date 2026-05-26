@@ -30,6 +30,7 @@
 #include "rocksdb/types.h"
 #include "rocksdb/universal_compaction.h"
 #include "rocksdb/version.h"
+#include "rocksdb/cache.h"
 #include "rocksdb/write_buffer_manager.h"
 
 #ifdef max  // ODR-SAFE
@@ -827,6 +828,10 @@ struct DBOptions {
 
   // If non-null, then we should collect metrics about database operations
   std::shared_ptr<Statistics> statistics = nullptr;
+
+  // EXPERIMENTAL: Feedback-based controller for primary vs compressed-secondary
+  // DRAM split on tiered or stacked block caches. Requires statistics.
+  CacheTierControllerOptions cache_tier_controller_options;
 
   // By default, writes to stable storage use fdatasync (on platforms
   // where this function is available). If this option is true,

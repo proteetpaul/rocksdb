@@ -13,13 +13,16 @@
 #include "cache/clock_cache.h"
 #include "cache_helpers.h"
 #include "db/db_test_util.h"
+#include "db/merge_context.h"
 #include "file/sst_file_manager_impl.h"
+#include "monitoring/active_get_context_scope.h"
 #include "port/port.h"
 #include "port/stack_trace.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/io_status.h"
 #include "rocksdb/sst_file_manager.h"
 #include "rocksdb/utilities/cache_dump_load.h"
+#include "table/get_context.h"
 #include "test_util/secondary_cache_test_util.h"
 #include "test_util/testharness.h"
 #include "typed_cache.h"
@@ -1238,6 +1241,27 @@ class DBSecondaryCacheTest : public DBTestBase, public WithCacheTypeParam {
 INSTANTIATE_TEST_CASE_P(DBSecondaryCacheTest, DBSecondaryCacheTest,
                         GetTestingCacheTypes());
 
+// Minimal GetContext scope so direct cache->Lookup tests exercise user-path
+// secondary hit tickers (see RecordSecondaryCacheHitForUserGet).
+class SecondaryCacheStatsGetScope {
+ public:
+  explicit SecondaryCacheStatsGetScope(Statistics* statistics)
+      : get_context_(BytewiseComparator(), nullptr, nullptr, statistics,
+                     GetContext::kNotFound, user_key_, nullptr, nullptr,
+                     nullptr, &merge_context_, true,
+                     &max_covering_tombstone_seq_, nullptr),
+        active_get_context_(&get_context_) {}
+
+  void ReportCounters() { get_context_.ReportCounters(); }
+
+ private:
+  static inline const std::string user_key_{"key"};
+  MergeContext merge_context_;
+  SequenceNumber max_covering_tombstone_seq_ = 0;
+  GetContext get_context_;
+  ActiveGetContextScope active_get_context_;
+};
+
 TEST_P(BasicSecondaryCacheTest, BasicTest) {
   std::shared_ptr<TestSecondaryCache> secondary_cache =
       std::make_shared<TestSecondaryCache>(4096, true);
@@ -1263,6 +1287,7 @@ TEST_P(BasicSecondaryCacheTest, BasicTest) {
   ASSERT_OK(cache->Insert(k2.AsSlice(), item2, GetHelper(), str2.length()));
 
   get_perf_context()->Reset();
+  SecondaryCacheStatsGetScope stats_scope(stats.get());
   Cache::Handle* handle;
   handle = cache->Lookup(k2.AsSlice(), GetHelper(),
                          /*context*/ this, Cache::Priority::LOW, stats.get());
@@ -1284,6 +1309,7 @@ TEST_P(BasicSecondaryCacheTest, BasicTest) {
   ASSERT_EQ(static_cast<TestItem*>(cache->Value(handle))->Size(), str3.size());
   cache->Release(handle);
 
+  stats_scope.ReportCounters();
   ASSERT_EQ(secondary_cache->num_inserts(), 3u);
   ASSERT_EQ(secondary_cache->num_lookups(), 2u);
   ASSERT_EQ(stats->getTickerCount(SECONDARY_CACHE_HITS),
@@ -1316,6 +1342,7 @@ TEST_P(BasicSecondaryCacheTest, StatsTest) {
   ASSERT_OK(secondary_cache->InsertSaved(k3.AsSlice(), str3));
 
   get_perf_context()->Reset();
+  SecondaryCacheStatsGetScope stats_scope(stats.get());
   Cache::Handle* handle;
   handle = cache->Lookup(k1.AsSlice(), GetHelper(CacheEntryRole::kFilterBlock),
                          /*context*/ this, Cache::Priority::LOW, stats.get());
@@ -1335,6 +1362,7 @@ TEST_P(BasicSecondaryCacheTest, StatsTest) {
   ASSERT_EQ(static_cast<TestItem*>(cache->Value(handle))->Size(), str3.size());
   cache->Release(handle);
 
+  stats_scope.ReportCounters();
   ASSERT_EQ(secondary_cache->num_inserts(), 3u);
   ASSERT_EQ(secondary_cache->num_lookups(), 3u);
   ASSERT_EQ(stats->getTickerCount(SECONDARY_CACHE_HITS),
