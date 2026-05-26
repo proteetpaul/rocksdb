@@ -121,8 +121,10 @@ class TestOpenEvolveCacheEvaluator(unittest.TestCase):
             self.assertEqual(result.metrics["throughput_qps"], 50000.0)
             self.assertEqual(result.metrics["mean_read_latency"], 5.0)
             self.assertEqual(result.metrics["read_p50_us"], 4.5)
-            self.assertAlmostEqual(result.metrics["block_cache_hit_rate"], 0.9)
-            self.assertAlmostEqual(result.metrics["secondary_cache_hit_rate"], 0.5)
+            self.assertAlmostEqual(result.metrics["primary_cache_hit_rate"], 0.87)
+            self.assertAlmostEqual(
+                result.metrics["secondary_cache_hit_rate"], 300.0 / 1300.0
+            )
             self.assertEqual(result.artifacts.get("status"), "ok")
 
             installed = (workspace / evaluator._EVOLVE_CACHE_POLICY_H_RELATIVE).read_text(

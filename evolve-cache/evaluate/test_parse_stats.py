@@ -50,8 +50,8 @@ class TestDeriveCacheHitRateMetrics(unittest.TestCase):
             "rocksdb.secondary.cache.hits.count": 300.0,
         }
         out = derive_cache_hit_rate_metrics(block, tier)
-        self.assertAlmostEqual(out["block_cache_hit_rate"], 0.9)
-        self.assertAlmostEqual(out["secondary_cache_hit_rate"], 0.3)
+        self.assertAlmostEqual(out["primary_cache_hit_rate"], 0.87)
+        self.assertAlmostEqual(out["secondary_cache_hit_rate"], 300.0 / 1300.0)
 
 
 class TestParseReadBlockGetHistogram(unittest.TestCase):
