@@ -167,7 +167,7 @@ prompt:
     - OpenEvolve bins programs using: `mean_read_latency`, `throughput_qps`, `primary_cache_hit_rate`, `secondary_cache_hit_rate` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same latency or cache-efficiency cell.
 
     Artifacts (when `include_artifacts` is enabled)
-    - Success (`artifacts.status` / `status` = `ok`): paths and run metadata only. The `log` field is intentionally empty; use numeric metrics above.
+    - Success (`artifacts.status` / `status` = `ok`): paths and run metadata, plus parsed cache tier controller logs (`controller_log`, `controller_adjustments`, counts, `controller_final_secondary_ratio`). The `log` field remains empty (full db_bench stdout is not stored).
     - `evolved_source_install_failed`: candidate file could not be installed into `cache/hit_rate_ghost_policy.h`.
     - `rocksdb_cmake_failed`: build failed; see cmake/build stderr in artifacts.
     - `load_failed` / `run_failed`: db_bench phase failed.

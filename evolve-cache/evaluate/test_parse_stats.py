@@ -5,8 +5,10 @@ from __future__ import annotations
 import unittest
 
 from parse_stats import (
+    controller_log_artifacts,
     derive_cache_hit_rate_metrics,
     parse_block_cache_statistics,
+    parse_cache_tier_controller_logs,
     parse_cache_tier_statistics,
     parse_read_block_get_histogram,
 )
@@ -66,6 +68,31 @@ class TestParseReadBlockGetHistogram(unittest.TestCase):
         self.assertEqual(out["rocksdb.read.block.get.micros.p99"], 800.0)
         self.assertNotIn("rocksdb.read.block.get.micros.count", out)
         self.assertNotIn("rocksdb.read.block.get.micros.sum", out)
+
+
+class TestParseCacheTierControllerLogs(unittest.TestCase):
+    def test_adjustments_and_failures(self) -> None:
+        text = (
+            "2026/05/26-12:00:00.123456 1abc Cache tier controller: adjusted "
+            "secondary ratio from 0.50 to 0.55\n"
+            "2026/05/26-12:00:10.123456 1abc Cache tier controller: adjusted "
+            "secondary ratio from 0.55 to 0.60\n"
+            "2026/05/26-12:00:20.123456 1abc Cache tier controller: failed to "
+            "adjust secondary ratio from 0.60 to 0.65: Not supported\n"
+        )
+        entries = parse_cache_tier_controller_logs(text)
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[0].level, "info")
+        self.assertAlmostEqual(entries[0].from_ratio, 0.50)
+        self.assertAlmostEqual(entries[0].to_ratio, 0.55)
+        self.assertEqual(entries[2].level, "warn")
+        self.assertEqual(entries[2].error, "Not supported")
+
+        artifacts = controller_log_artifacts(entries)
+        self.assertEqual(artifacts["controller_adjustment_count"], "2")
+        self.assertEqual(artifacts["controller_adjustment_failures"], "1")
+        self.assertEqual(artifacts["controller_final_secondary_ratio"], "0.6")
+        self.assertIn("adjusted secondary ratio from 0.55 to 0.60", artifacts["controller_log"])
 
 
 if __name__ == "__main__":

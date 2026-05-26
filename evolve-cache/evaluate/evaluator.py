@@ -65,8 +65,10 @@ from dremel.options_file import write_options_file
 from dremel.parse_db_bench import parse_db_bench_output
 
 from parse_stats import (
+    controller_log_artifacts,
     derive_cache_hit_rate_metrics,
     parse_block_cache_statistics,
+    parse_cache_tier_controller_logs,
     parse_cache_tier_statistics,
     parse_read_block_get_histogram,
 )
@@ -467,6 +469,10 @@ def evaluate(program_path: str) -> EvaluationResult:
             cache_tier_stats = parse_cache_tier_statistics(output_text)
             read_block_get_stats = parse_read_block_get_histogram(output_text)
             hit_rates = derive_cache_hit_rate_metrics(block_cache_stats, cache_tier_stats)
+            controller_entries = parse_cache_tier_controller_logs(
+                output_text + "\n" + _read_db_info_log(db_dir)
+            )
+            controller_artifacts = controller_log_artifacts(controller_entries)
 
             throughput = perf_metrics.throughput_qps or 0.0
             mean_read = (
@@ -505,6 +511,7 @@ def evaluate(program_path: str) -> EvaluationResult:
                     "db_bench_path": str(db_bench),
                     "db_dir": str(db_dir),
                     "log": "",
+                    **controller_artifacts,
                 },
             )
         finally:
@@ -860,6 +867,21 @@ def _scoped_argv(db_bench: Path, db_bench_flags: list[str], memory_limit_bytes: 
         str(db_bench),
         *db_bench_flags,
     ]
+
+
+def _read_db_info_log(db_dir: Path) -> str:
+    """Read RocksDB info log(s) written under the db_bench database directory."""
+    if not db_dir.is_dir():
+        return ""
+    chunks: list[str] = []
+    for path in sorted(db_dir.glob("LOG*")):
+        if not path.is_file():
+            continue
+        try:
+            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:
+            logger.warning("Failed to read RocksDB info log %s: %s", path, exc)
+    return "\n".join(chunks)
 
 
 def _run(argv: list[str], *, timeout_sec: float | None) -> subprocess.CompletedProcess[str]:

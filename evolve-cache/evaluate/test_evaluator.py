@@ -78,7 +78,10 @@ class TestOpenEvolveCacheEvaluator(unittest.TestCase):
             load_output = (
                 "fillrandom : 4.0 micros/op 20000 ops/sec 1.0 seconds 10000 operations\n"
             )
+            db_dir.mkdir(parents=True, exist_ok=True)
             run_output = (
+                "2026/05/26-12:00:00.123456 1abc Cache tier controller: adjusted "
+                "secondary ratio from 0.50 to 0.55\n"
                 "readrandomwriterandom : 10.000 micros/op 50000 ops/sec 1.000 seconds 1000000 operations\n"
                 "Microseconds per read:\n"
                 "Count: 1000 Average: 5.0000  StdDev: 1.00\n"
@@ -126,6 +129,9 @@ class TestOpenEvolveCacheEvaluator(unittest.TestCase):
                 result.metrics["secondary_cache_hit_rate"], 300.0 / 1300.0
             )
             self.assertEqual(result.artifacts.get("status"), "ok")
+            self.assertIn("adjusted secondary ratio from 0.50 to 0.55", result.artifacts["controller_log"])
+            self.assertEqual(result.artifacts["controller_adjustment_count"], "1")
+            self.assertEqual(result.artifacts["controller_final_secondary_ratio"], "0.55")
 
             installed = (workspace / evaluator._EVOLVE_CACHE_POLICY_H_RELATIVE).read_text(
                 encoding="utf-8"

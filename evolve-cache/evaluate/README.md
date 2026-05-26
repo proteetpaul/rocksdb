@@ -83,6 +83,14 @@ The returned `EvaluationResult.metrics` includes:
 Any non-success status is returned as `combined_score=-inf` with details in
 `artifacts`.
 
+On success, artifacts also include parsed `CacheTierMemoryController` info-log
+lines from `$DB_DIR/LOG*`:
+
+- `controller_log`: newline-separated matching log lines
+- `controller_adjustments`: JSON list of parsed adjustments/failures
+- `controller_adjustment_count`, `controller_adjustment_failures`
+- `controller_final_secondary_ratio`: last successful target ratio (empty if none)
+
 ## LZ4
 
 Tiered compressed secondary cache requires LZ4 at build and run time.

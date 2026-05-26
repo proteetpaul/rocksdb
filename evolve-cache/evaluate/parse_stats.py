@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterator
+import json
+import re
+from dataclasses import asdict, dataclass
+from typing import Dict, Iterator, List
+
+_CACHE_TIER_CONTROLLER_ADJUSTED_RE = re.compile(
+    r"Cache tier controller: adjusted secondary ratio from "
+    r"([0-9.]+) to ([0-9.]+)"
+)
+_CACHE_TIER_CONTROLLER_FAILED_RE = re.compile(
+    r"Cache tier controller: failed to adjust secondary ratio "
+    r"from ([0-9.]+) to ([0-9.]+): (.*)"
+)
 
 _BLOCK_CACHE_TICKERS = frozenset({"rocksdb.block.cache.hit", "rocksdb.block.cache.miss"})
 _CACHE_TIER_TICKERS = frozenset(
@@ -75,6 +87,69 @@ def parse_read_block_get_histogram(text: str) -> Dict[str, float]:
                 continue
             metrics[f"{_READ_BLOCK_GET_HISTOGRAM}.{lowered_suffix}"] = value
     return metrics
+
+
+@dataclass(frozen=True)
+class CacheTierControllerLogEntry:
+    level: str
+    from_ratio: float
+    to_ratio: float
+    message: str
+    error: str | None = None
+
+
+def parse_cache_tier_controller_logs(text: str) -> List[CacheTierControllerLogEntry]:
+    """
+    Parse ``CacheTierMemoryController::MaybeAdjust`` info/warn log lines.
+
+    Matches RocksDB info-log output (file or stderr) from
+    ``cache/cache_tier_memory_controller.cc``.
+    """
+    entries: List[CacheTierControllerLogEntry] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if "Cache tier controller:" not in line:
+            continue
+        failed = _CACHE_TIER_CONTROLLER_FAILED_RE.search(line)
+        if failed is not None:
+            entries.append(
+                CacheTierControllerLogEntry(
+                    level="warn",
+                    from_ratio=float(failed.group(1)),
+                    to_ratio=float(failed.group(2)),
+                    message=line,
+                    error=failed.group(3).strip(),
+                )
+            )
+            continue
+        adjusted = _CACHE_TIER_CONTROLLER_ADJUSTED_RE.search(line)
+        if adjusted is not None:
+            entries.append(
+                CacheTierControllerLogEntry(
+                    level="info",
+                    from_ratio=float(adjusted.group(1)),
+                    to_ratio=float(adjusted.group(2)),
+                    message=line,
+                )
+            )
+    return entries
+
+
+def controller_log_artifacts(entries: List[CacheTierControllerLogEntry]) -> Dict[str, str]:
+    """Build OpenEvolve artifact strings from parsed controller log entries."""
+    adjustments = [entry for entry in entries if entry.level == "info"]
+    failures = [entry for entry in entries if entry.level == "warn"]
+    payload = {
+        "controller_log": "\n".join(entry.message for entry in entries),
+        "controller_adjustments": json.dumps([asdict(entry) for entry in entries]),
+        "controller_adjustment_count": str(len(adjustments)),
+        "controller_adjustment_failures": str(len(failures)),
+    }
+    if adjustments:
+        payload["controller_final_secondary_ratio"] = str(adjustments[-1].to_ratio)
+    else:
+        payload["controller_final_secondary_ratio"] = ""
+    return payload
 
 
 def derive_cache_hit_rate_metrics(
