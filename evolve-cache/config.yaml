@@ -14,12 +14,12 @@ database:
   feature_dimensions:
     - mean_read_latency
     - throughput_qps
-    - block_cache_hit_rate
+    - primary_cache_hit_rate
     - secondary_cache_hit_rate
   feature_bins:
-    mean_read_latency: 3
+    mean_read_latency: 2
     throughput_qps: 2
-    block_cache_hit_rate: 2
+    primary_cache_hit_rate: 2
     secondary_cache_hit_rate: 2
 
 diff_based_evolution: true
@@ -53,7 +53,7 @@ prompt:
 
     Assumptions (enforced by the evaluator on every run):
     - Filter and index blocks are not cached (`cache_index_and_filter_blocks=false`); the block cache mostly holds data blocks from SSTable files.
-    - The workload will consist of updates and point reads with some skew
+    - Default evaluation workload is read-only random point reads (`bench/workloads/readrandom_cache_tier.ini` via `eval_config.json` `workload_ini`): 100% `readrandom` after a fillrandom load phase. No writes during measurement so cache hit-rate signals reflect read-path caching only.
     - Direct IO is enabled (`use_direct_reads=true`, `use_direct_io_for_flush_and_compaction=true`) so the kernel page cache is bypassed during reads, flushes, and compaction
 
     Promotion (secondary → primary, on lookup):
@@ -93,11 +93,13 @@ prompt:
       // Cumulative READ_BLOCK_GET_MICROS at MaybeAdjust (proxy for secondary cache miss cost)
       double disk_read_p50_us;
       double disk_read_p99_us;
+      double disk_read_average_us;
     };
     struct CacheTierMemorySnapshot {
       uint64_t interval_us;
       double primary_hit_rate;
       double secondary_hit_rate;
+      uint64_t primary_lookups;
       uint64_t dummy_hits;
       uint64_t sec_cache_uncompressed_bytes;
       uint64_t sec_cache_compressed_bytes;
@@ -115,8 +117,10 @@ prompt:
     Per-snapshot fields are described below — values are per-sample deltas unless otherwise noted.
     
     Hit rates (derived, [0, 1] when denominator > 0):
-    - `primary_hit_rate` — `BLOCK_CACHE_HIT / (BLOCK_CACHE_HIT + BLOCK_CACHE_MISS)` over this sample interval.
-    - `secondary_hit_rate` — `SECONDARY_CACHE_HITS / BLOCK_CACHE_MISS` over this interval. Secondary is only consulted on primary miss, so this is the fraction of misses served from secondary. 0 when there were no primary misses.
+    - Ticker semantics (user Get/MultiGet only): `BLOCK_CACHE_HIT` counts primary and secondary successes; `BLOCK_CACHE_MISS` counts disk reads only (both tiers missed); `SECONDARY_CACHE_HITS` is a subset of `BLOCK_CACHE_HIT`. Do not treat raw `BLOCK_CACHE_HIT` as primary-only.
+    - `primary_lookups` — per-interval delta: `BLOCK_CACHE_HIT + BLOCK_CACHE_MISS` since the previous sample (total block lookups).
+    - `primary_hit_rate` — `(BLOCK_CACHE_HIT − SECONDARY_CACHE_HITS) / (BLOCK_CACHE_HIT + BLOCK_CACHE_MISS)` over this sample interval.
+    - `secondary_hit_rate` — `SECONDARY_CACHE_HITS / (SECONDARY_CACHE_HITS + BLOCK_CACHE_MISS)` over this interval. Fraction of primary misses served from secondary. 0 when there were no primary misses.
 
     Ghost / admission (raw uint64_t deltas):
     - `dummy_hits` — secondary lookups that hit a placeholder only (`COMPRESSED_SECONDARY_CACHE_DUMMY_HITS`); block still read from SST. High rate ⇒ many keys in the two-hit pipeline but not yet stored compressed.
@@ -130,10 +134,10 @@ prompt:
     - `mean_decompress_us` — `sec_cache_decompress_nanos / decompress_count / 1000`; 0 if no decompressions. Lower is cheaper secondary hits.
 
     Secondary cache misses (per-interval ticker delta):
-    - `secondary_miss_count` — `BLOCK_CACHE_MISS − SECONDARY_CACHE_HITS` over this sample interval; primary misses not served by secondary.
+    - `secondary_miss_count` — `BLOCK_CACHE_MISS` delta over this sample interval; disk reads after both tiers miss.
 
     Disk read latency (window-level, cumulative at MaybeAdjust; proxied via READ_BLOCK_GET_MICROS):
-    - `window.disk_read_p50_us`, `window.disk_read_p99_us` — cumulative histogram at policy time; treat as stable disk miss cost (not per-interval).
+    - `window.disk_read_p50_us`, `window.disk_read_p99_us`, `window.disk_read_average_us` — cumulative histogram at policy time; treat as stable disk miss cost (not per-interval).
 
     Working-set proxy (point-in-time, not a delta):
     - `s.active_sst_raw_bytes` — accumulated raw key+value bytes on active SSTs (partial live set). Compare against total cache budget to gauge pressure; O(1) sampled under DB mutex.
@@ -147,6 +151,7 @@ prompt:
     - Always guard: `if (window.samples.empty()) return current_ratio;`
 
     Evaluation:
+    - Workload: set `workload_ini` in `evolve-cache/eval_config.json` (default `bench/workloads/readrandom_cache_tier.ini`). Load phase uses `bench/workloads/load.ini`; shared flags come from `bench/bench.ini`. YCSB mixed read/write workloads (`workload_a.ini`, etc.) remain available under `bench/workloads/` but are not the default for cache-tier evolution.
     - Two-phase benchmark: one db_bench run lasts `eval_warmup_sec + eval_measure_sec` (defaults 180s + 60s). During warmup the cache tier controller may tune the ratio; at the boundary Statistics and histograms reset and tuning stops. Reported metrics reflect the measure window only.
 
     How to read each evaluation (metrics, MAP-Elites, artifacts)
@@ -154,12 +159,12 @@ prompt:
     - `combined_score` is the primary scalar fitness signal for selection; it equals `-mean_read_latency` (higher is better; lower latency wins).
     - `rocksdb_build_success` is 1.0 when build and benchmark completed, 0.0 on failure paths.
     - Latency metrics are in microseconds: `mean_read_latency`, `read_p50_us`, `read_p99_us`.
-    - Cache effectiveness: `block_cache_hit_rate`, `secondary_cache_hit_rate` (derived from STATISTICS tickers at end of workload).
-    - Raw ticker counts may appear as `rocksdb.block.cache.hit.count`, `rocksdb.block.cache.miss.count`, `rocksdb.secondary.cache.hits.count`, `rocksdb.compressed.secondary.cache.hits.count`, `rocksdb.compressed.secondary.cache.dummy.hits.count`. Use `rocksdb.secondary.cache.hits.count` for `secondary_cache_hit_rate`; do not add `rocksdb.compressed.secondary.cache.hits.count` (both may increment on the same compressed-tier hit).
+    - Cache effectiveness: `primary_cache_hit_rate` (primary-tier only, same formula as `primary_hit_rate`), `secondary_cache_hit_rate` (derived from STATISTICS tickers at end of workload using the formulas above).
+    - Raw ticker counts may appear as `rocksdb.block.cache.hit.count`, `rocksdb.block.cache.miss.count`, `rocksdb.secondary.cache.hits.count`, `rocksdb.compressed.secondary.cache.hits.count`, `rocksdb.compressed.secondary.cache.dummy.hits.count`. Use `rocksdb.secondary.cache.hits.count` for secondary hit-rate numerator; do not add `rocksdb.compressed.secondary.cache.hits.count` (both may increment on the same compressed-tier hit). Derive rates as: primary = (hit − secondary_hits) / (hit + miss); secondary = secondary_hits / (secondary_hits + miss).
     - End-of-run READ_BLOCK_GET_MICROS histogram in microseconds (cumulative proxy for block-cache-miss SST reads): `rocksdb.read.block.get.micros.p50`, `.p99`.
 
     MAP-Elites feature dimensions (diversity grid)
-    - OpenEvolve bins programs using: `mean_read_latency`, `throughput_qps`, `block_cache_hit_rate`, `secondary_cache_hit_rate` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same latency or cache-efficiency cell.
+    - OpenEvolve bins programs using: `mean_read_latency`, `throughput_qps`, `primary_cache_hit_rate`, `secondary_cache_hit_rate` (see `database.feature_dimensions` in config). Different cells reward different tradeoffs; improving throughput alone is not enough if it always sacrifices the same latency or cache-efficiency cell.
 
     Artifacts (when `include_artifacts` is enabled)
     - Success (`artifacts.status` / `status` = `ok`): paths and run metadata only. The `log` field is intentionally empty; use numeric metrics above.

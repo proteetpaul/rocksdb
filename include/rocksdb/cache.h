@@ -572,8 +572,15 @@ Status UpdateCacheTierSplit(const std::shared_ptr<Cache>& cache,
 
 struct CacheTierMemorySnapshot {
   uint64_t interval_us = 0;
+  // Primary-tier hit rate: (BLOCK_CACHE_HIT - SECONDARY_CACHE_HITS) /
+  // (BLOCK_CACHE_HIT + BLOCK_CACHE_MISS) over the sample interval.
   double primary_hit_rate = 0.0;
+  // Fraction of primary misses served from secondary:
+  // SECONDARY_CACHE_HITS / (SECONDARY_CACHE_HITS + BLOCK_CACHE_MISS).
   double secondary_hit_rate = 0.0;
+  // Per-interval total block lookups (BLOCK_CACHE_HIT + BLOCK_CACHE_MISS
+  // deltas); warmup gating.
+  uint64_t primary_lookups = 0;
   uint64_t dummy_hits = 0;
   // Per-interval compressed-secondary perf (aggregated PerfContext-aligned).
   uint64_t sec_cache_uncompressed_bytes = 0;
@@ -583,7 +590,7 @@ struct CacheTierMemorySnapshot {
   uint64_t sec_cache_decompress_nanos = 0;
   double compression_ratio = 0.0;
   double mean_decompress_us = 0.0;
-  // Per-interval: primary misses not served by secondary.
+  // Per-interval disk reads after both tiers miss (BLOCK_CACHE_MISS delta).
   uint64_t secondary_miss_count = 0;
   // Point-in-time footprint in compressed-secondary (logical + stored bytes).
   uint64_t dataset_uncompressed_bytes = 0;
@@ -599,6 +606,7 @@ struct CacheTierMemoryWindow {
   // Cumulative READ_BLOCK_GET_MICROS at MaybeAdjust (proxy for disk miss cost).
   double disk_read_p50_us = 0.0;
   double disk_read_p99_us = 0.0;
+  double disk_read_average_us = 0.0;
 };
 
 class CacheTierMemoryPolicy {

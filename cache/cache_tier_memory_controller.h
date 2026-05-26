@@ -22,19 +22,14 @@ class Statistics;
 
 CompressedSecondaryCache* GetCompressedSecondaryCache(const Cache* cache);
 
-// Extended snapshot with per-interval lookup deltas for warmup gating.
-struct CacheTierMemorySnapshotInternal : public CacheTierMemorySnapshot {
-  uint64_t primary_hits_delta = 0;
-  uint64_t primary_misses_delta = 0;
-};
-
 // Returns true if cache is TieredCache or has a compressed secondary tier.
 bool CacheSupportsTierMemoryControl(const Cache* cache);
 
 // Current secondary_ratio in [0, 1], or false if unsupported.
 bool GetCacheTierSecondaryRatio(const Cache* cache, double* ratio);
 
-// Apply ratio via UpdateTieredCache or UpdateCacheTierSplit.
+// Apply ratio via UpdateCacheReservationRatio (TieredCache) or
+// UpdateCacheTierSplit (stacked cache).
 Status ApplyCacheTierSecondaryRatio(const std::shared_ptr<Cache>& cache,
                                     double secondary_ratio);
 
@@ -70,7 +65,7 @@ class CacheTierMemoryController {
     bool initialized = false;
   };
 
-  struct PerfBaseline {
+  struct SecondaryCacheBaseline {
     uint64_t uncompressed_bytes = 0;
     uint64_t compressed_bytes = 0;
     uint64_t insert_real_count = 0;
@@ -96,8 +91,8 @@ class CacheTierMemoryController {
   size_t max_window_samples_;
   Statistics* statistics_;
   TickerBaseline baseline_;
-  PerfBaseline perf_baseline_;
-  std::deque<CacheTierMemorySnapshotInternal> ring_buffer_;
+  SecondaryCacheBaseline sec_cache_baseline_;
+  std::deque<CacheTierMemorySnapshot> ring_buffer_;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

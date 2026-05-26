@@ -82,24 +82,27 @@ def derive_cache_hit_rate_metrics(
     cache_tier_stats: Dict[str, float],
 ) -> Dict[str, float]:
     """
-    Derive aggregate hit rates from cumulative ticker counts at end of workload.
+    Derive hit rates from cumulative ticker counts at end of workload.
 
-    ``block_cache_hit_rate`` uses primary block cache hits / (hits + misses).
-    ``secondary_cache_hit_rate`` uses ``SECONDARY_CACHE_HITS`` /
-    primary misses when misses > 0 (aligned with controller interval semantics).
+    ``rocksdb.block.cache.hit`` counts primary and secondary successes;
+    ``rocksdb.block.cache.miss`` counts disk reads only. ``primary_cache_hit_rate``
+    is primary-tier only: (hits - secondary_hits) / (hits + misses).
+    ``secondary_cache_hit_rate`` is secondary_hits / (secondary_hits + misses).
     """
     hits = block_cache_stats.get("rocksdb.block.cache.hit.count", 0.0)
     misses = block_cache_stats.get("rocksdb.block.cache.miss.count", 0.0)
     lookups = hits + misses
-    block_hit_rate = hits / lookups if lookups > 0.0 else 0.0
-
     sec_hits = cache_tier_stats.get("rocksdb.secondary.cache.hits.count", 0.0)
+    primary_hits = max(0.0, hits - sec_hits)
+    block_hit_rate = primary_hits / lookups if lookups > 0.0 else 0.0
+
+    primary_misses = sec_hits + misses
     secondary_hit_rate = 0.0
-    if misses > 0.0:
-        secondary_hit_rate = sec_hits / misses
+    if primary_misses > 0.0:
+        secondary_hit_rate = sec_hits / primary_misses
 
     return {
-        "block_cache_hit_rate": block_hit_rate,
+        "primary_cache_hit_rate": block_hit_rate,
         "secondary_cache_hit_rate": secondary_hit_rate,
     }
 

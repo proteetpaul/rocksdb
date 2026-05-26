@@ -123,7 +123,7 @@ def _failure_metrics(**overrides: float) -> dict[str, float]:
         "throughput_qps": 0.0,
         "mean_read_latency": 0.0,
         "read_p99_us": 0.0,
-        "block_cache_hit_rate": 0.0,
+        "primary_cache_hit_rate": 0.0,
         "secondary_cache_hit_rate": 0.0,
     }
     metrics.update(overrides)
@@ -490,10 +490,10 @@ def evaluate(program_path: str) -> EvaluationResult:
             metrics.update(read_block_get_stats)
 
             logger.info(
-                "Evaluation ok throughput_qps=%s mean_read_latency=%s block_cache_hit_rate=%s",
+                "Evaluation ok throughput_qps=%s mean_read_latency=%s primary_cache_hit_rate=%s",
                 throughput,
                 mean_read,
-                hit_rates.get("block_cache_hit_rate"),
+                hit_rates.get("primary_cache_hit_rate"),
             )
             return EvaluationResult(
                 metrics=metrics,

@@ -6,9 +6,20 @@ cache tier controller enabled.
 
 ## Required environment variables
 
-- `OPENEVOLVE_EVAL_CONFIG`: path to evaluator runtime JSON config
+- `OPENEVOLVE_EVAL_CONFIG`: path to evaluator runtime JSON config (optional if
+  `evolve-cache/eval_config.json` exists)
 - `DB_BENCH`: absolute path to executable `db_bench`
-- `DB_DIR`: database directory for db_bench runs
+- `DB_DIR`: database directory for db_bench runs (scratch; must differ from
+  golden DB when using checkpoints)
+
+## Optional environment variables (checkpoint workflow)
+
+When `use_checkpoint: true` in the eval config, the load phase is skipped and
+`DB_DIR` is populated from a golden database via `ldb checkpoint`. Set either
+the env vars below or the equivalent JSON fields (`golden_db_dir`, `ldb`):
+
+- `GOLDEN_DB_DIR` or `CHECKPOINT_SOURCE_DB`: path to the source database directory
+- `LDB`: absolute path to executable `ldb`
 
 ## Hard requirements enforced by evaluator
 
@@ -33,7 +44,9 @@ Use [`evaluate/config.example.json`](config.example.json) as a template.
 
 Important fields:
 
-- `workload_ini` (required): target workload definition (`db_bench` flags)
+- `workload_ini` (required): target workload definition (`db_bench` flags).
+  Default for evolve-cache: `bench/workloads/readrandom.ini`
+  (100% `readrandom`, read-only cache tier sizing).
 - `memory_limit` (required): fixed cgroup budget (`8G`, `512M`, or bytes)
 - `eval_warmup_sec` (optional, default `180`): tuning/convergence window before measurement
 - `eval_measure_sec` (optional, default `60`): measurement-only window; workload `duration` is set to their sum
@@ -42,6 +55,10 @@ Important fields:
 - `base_options_file` (optional): base RocksDB options INI; used with `options_overrides`
 - `db_bench_flags` (optional): flat map merged into db_bench flags
 - `timeout_sec` (optional): timeout for each subprocess call
+- `use_checkpoint` (optional, default `false`): skip load; copy `golden_db_dir`
+  into `DB_DIR` via `ldb` (see env vars above)
+- `golden_db_dir` (optional): same as `GOLDEN_DB_DIR` / `CHECKPOINT_SOURCE_DB`
+- `ldb` (optional): same as `LDB` env var
 
 ## `program_path` (evolved source) contract
 
@@ -60,7 +77,7 @@ The returned `EvaluationResult.metrics` includes:
 - `throughput_qps`
 - `mean_read_latency` (mean point-get read latency in **microseconds**, from db_bench `Microseconds per read:` histogram)
 - `read_p50_us`, `read_p99_us` (microseconds)
-- `block_cache_hit_rate`, `secondary_cache_hit_rate`
+- `primary_cache_hit_rate` (primary-tier only), `secondary_cache_hit_rate`
 - block cache and secondary-cache ticker counts from STATISTICS output
 
 Any non-success status is returned as `combined_score=-inf` with details in

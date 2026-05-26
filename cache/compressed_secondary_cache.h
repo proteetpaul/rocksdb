@@ -118,8 +118,7 @@ class CompressedSecondaryCache : public SecondaryCache {
 
   size_t TEST_GetUsage() { return cache_->GetUsage(); }
 
-  void GetAggregatedPerfCounters(
-      CompressedSecondaryCacheAggregatedPerf* out) const;
+  void GetAggregatedPerfCounters(CompressedSecondaryCacheAggregatedPerf* out) const;
 
  private:
   friend class CompressedSecondaryCacheTestBase;
@@ -140,6 +139,7 @@ class CompressedSecondaryCache : public SecondaryCache {
     RelaxedAtomic<uint64_t> decompress_count{0};
   };
   AggregatedPerfCounters aggregated_perf_;
+
   static constexpr std::array<uint16_t, 8> malloc_bin_sizes_{
       128, 256, 512, 1024, 2048, 4096, 8192, 16384};
 

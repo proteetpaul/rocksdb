@@ -85,7 +85,8 @@ TEST(CacheTierMemoryControllerTest, SampleHitRatesAndAdjust) {
   SetTicker(stats.get(), COMPRESSED_SECONDARY_CACHE_HITS, 5);
   controller.Sample(stats.get(), cache.get());
   ASSERT_EQ(1u, controller.TEST_NumSnapshots());
-  EXPECT_DOUBLE_EQ(0.5, controller.TEST_SnapshotAt(0).secondary_hit_rate);
+  EXPECT_DOUBLE_EQ(70.0 / 100.0, controller.TEST_SnapshotAt(0).primary_hit_rate);
+  EXPECT_DOUBLE_EQ(10.0 / 30.0, controller.TEST_SnapshotAt(0).secondary_hit_rate);
   ASSERT_OK(controller.MaybeAdjust(cache, nullptr));
   double ratio = 0.0;
   ASSERT_TRUE(GetCacheTierSecondaryRatio(cache.get(), &ratio));
@@ -255,7 +256,31 @@ TEST(CacheTierMemoryControllerTest, SecondaryMissCountSnapshot) {
   controller.Sample(stats.get(), cache.get());
 
   ASSERT_EQ(1u, controller.TEST_NumSnapshots());
-  ASSERT_EQ(7U, controller.TEST_SnapshotAt(0).secondary_miss_count);
+  ASSERT_EQ(10U, controller.TEST_SnapshotAt(0).secondary_miss_count);
+}
+
+TEST(CacheTierMemoryControllerTest, SecondaryHeavyHitRates) {
+  std::shared_ptr<Statistics> stats = CreateDBStatistics();
+  auto mock_clock = std::make_shared<MockSystemClock>(SystemClock::Default());
+  CacheTierControllerOptions opts;
+  opts.enabled = true;
+  opts.window_samples = 4;
+  CacheTierMemoryController controller(mock_clock.get(), opts);
+  auto cache = NewStackedTestCache(8 << 20, 2 << 20);
+
+  SetTicker(stats.get(), BLOCK_CACHE_HIT, 0);
+  SetTicker(stats.get(), BLOCK_CACHE_MISS, 0);
+  controller.Sample(stats.get(), cache.get());  // baseline only
+
+  SetTicker(stats.get(), BLOCK_CACHE_HIT, 80);
+  SetTicker(stats.get(), BLOCK_CACHE_MISS, 20);
+  SetTicker(stats.get(), SECONDARY_CACHE_HITS, 80);
+  controller.Sample(stats.get(), cache.get());
+
+  ASSERT_EQ(1u, controller.TEST_NumSnapshots());
+  EXPECT_DOUBLE_EQ(0.0, controller.TEST_SnapshotAt(0).primary_hit_rate);
+  EXPECT_DOUBLE_EQ(0.8, controller.TEST_SnapshotAt(0).secondary_hit_rate);
+  ASSERT_EQ(20U, controller.TEST_SnapshotAt(0).secondary_miss_count);
 }
 
 TEST(CacheTierMemoryControllerTest, SecondaryHitRateIgnoresCompressedTicker) {
@@ -277,8 +302,9 @@ TEST(CacheTierMemoryControllerTest, SecondaryHitRateIgnoresCompressedTicker) {
   controller.Sample(stats.get(), cache.get());
 
   ASSERT_EQ(1u, controller.TEST_NumSnapshots());
-  EXPECT_DOUBLE_EQ(0.15, controller.TEST_SnapshotAt(0).secondary_hit_rate);
-  ASSERT_EQ(85U, controller.TEST_SnapshotAt(0).secondary_miss_count);
+  EXPECT_DOUBLE_EQ(15.0 / 115.0,
+                    controller.TEST_SnapshotAt(0).secondary_hit_rate);
+  ASSERT_EQ(100U, controller.TEST_SnapshotAt(0).secondary_miss_count);
 }
 
 TEST(CacheTierMemoryControllerTest, DiskReadLatencyOnAdjust) {
@@ -310,6 +336,7 @@ TEST(CacheTierMemoryControllerTest, DiskReadLatencyOnAdjust) {
   ASSERT_OK(controller.MaybeAdjust(cache, nullptr));
   EXPECT_GT(capturing_policy->last_window.disk_read_p50_us, 0.0);
   EXPECT_GT(capturing_policy->last_window.disk_read_p99_us, 0.0);
+  EXPECT_GT(capturing_policy->last_window.disk_read_average_us, 0.0);
 }
 
 TEST(CacheTierMemoryControllerTest, ActiveSstRawBytesInSnapshot) {
@@ -354,6 +381,26 @@ TEST(CacheTierMemoryControllerTest, UpdateCacheTierSplitRejectsTiered) {
   auto cache = NewTieredCache(opts);
   ASSERT_TRUE(cache != nullptr);
   ASSERT_NOK(UpdateCacheTierSplit(cache, 0.3));
+}
+
+TEST(CacheTierMemoryControllerTest, ApplySecondaryRatioPreservesAdmissionPolicy) {
+  TieredCacheOptions opts;
+  LRUCacheOptions lru_opts;
+  lru_opts.capacity = 64 << 20;
+  opts.cache_opts = &lru_opts;
+  opts.total_capacity = 64 << 20;
+  opts.compressed_secondary_ratio = 0.5;
+  opts.adm_policy = TieredAdmissionPolicy::kAdmPolicyAllowAll;
+  auto cache = NewTieredCache(opts);
+  ASSERT_TRUE(cache != nullptr);
+  auto* adapter =
+      static_cast_with_check<CacheWithSecondaryAdapter>(cache.get());
+  ASSERT_NE(adapter, nullptr);
+  ASSERT_EQ(TieredAdmissionPolicy::kAdmPolicyAllowAll,
+            adapter->GetAdmissionPolicy());
+  ASSERT_OK(ApplyCacheTierSecondaryRatio(cache, 0.35));
+  ASSERT_EQ(TieredAdmissionPolicy::kAdmPolicyAllowAll,
+            adapter->GetAdmissionPolicy());
 }
 
 }  // namespace ROCKSDB_NAMESPACE

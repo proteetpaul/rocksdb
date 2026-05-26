@@ -66,12 +66,10 @@ void CompressedSecondaryCache::GetAggregatedPerfCounters(
   if (out == nullptr) {
     return;
   }
-  out->uncompressed_bytes =
-      aggregated_perf_.uncompressed_bytes.LoadRelaxed();
+  out->uncompressed_bytes = aggregated_perf_.uncompressed_bytes.LoadRelaxed();
   out->compressed_bytes = aggregated_perf_.compressed_bytes.LoadRelaxed();
   out->insert_real_count = aggregated_perf_.insert_real_count.LoadRelaxed();
-  out->insert_placeholder_count =
-      aggregated_perf_.insert_placeholder_count.LoadRelaxed();
+  out->insert_placeholder_count = aggregated_perf_.insert_placeholder_count.LoadRelaxed();
   out->decompress_nanos = aggregated_perf_.decompress_nanos.LoadRelaxed();
   out->decompress_count = aggregated_perf_.decompress_count.LoadRelaxed();
 }

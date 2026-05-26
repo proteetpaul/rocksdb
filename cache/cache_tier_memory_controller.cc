@@ -96,8 +96,18 @@ Status ApplyCacheTierSecondaryRatio(const std::shared_ptr<Cache>& cache,
   if (cache == nullptr) {
     return Status::InvalidArgument("cache is null");
   }
+  if (secondary_ratio < 0.0 || secondary_ratio > 1.0) {
+    return Status::InvalidArgument("secondary_ratio out of range");
+  }
   if (strcmp(cache->Name(), "TieredCache") == 0) {
-    return UpdateTieredCache(cache, -1, secondary_ratio);
+    auto* adapter =
+        static_cast_with_check<CacheWithSecondaryAdapter>(cache.get());
+    if (adapter == nullptr) {
+      return Status::NotSupported("cache is not CacheWithSecondaryAdapter");
+    }
+    // Ratio-only update: do not call UpdateTieredCache, which may also change
+    // admission policy when adm_policy is passed explicitly.
+    return adapter->UpdateCacheReservationRatio(secondary_ratio);
   }
   return UpdateCacheTierSplit(cache, secondary_ratio, -1);
 }
@@ -128,14 +138,10 @@ void CacheTierMemoryController::UpdateBaseline(
   }
   // Cumulative DB Statistics used to derive per-interval hit rates and
   // ghost/admission signals (deltas vs. previous Sample() call).
-  baseline_.block_cache_hit =
-      statistics->getTickerCount(Tickers::BLOCK_CACHE_HIT);
-  baseline_.block_cache_miss =
-      statistics->getTickerCount(Tickers::BLOCK_CACHE_MISS);
-  baseline_.secondary_cache_hits =
-      statistics->getTickerCount(Tickers::SECONDARY_CACHE_HITS);
-  baseline_.dummy_hits = statistics->getTickerCount(
-      Tickers::COMPRESSED_SECONDARY_CACHE_DUMMY_HITS);
+  baseline_.block_cache_hit = statistics->getTickerCount(Tickers::BLOCK_CACHE_HIT);
+  baseline_.block_cache_miss = statistics->getTickerCount(Tickers::BLOCK_CACHE_MISS);
+  baseline_.secondary_cache_hits = statistics->getTickerCount(Tickers::SECONDARY_CACHE_HITS);
+  baseline_.dummy_hits = statistics->getTickerCount(Tickers::COMPRESSED_SECONDARY_CACHE_DUMMY_HITS);
   baseline_.initialized = true;
 
   // Cumulative compressed-secondary perf counters (PerfContext-aligned,
@@ -143,13 +149,13 @@ void CacheTierMemoryController::UpdateBaseline(
   if (sec_cache != nullptr) {
     CompressedSecondaryCacheAggregatedPerf perf;
     sec_cache->GetAggregatedPerfCounters(&perf);
-    perf_baseline_.uncompressed_bytes = perf.uncompressed_bytes;
-    perf_baseline_.compressed_bytes = perf.compressed_bytes;
-    perf_baseline_.insert_real_count = perf.insert_real_count;
-    perf_baseline_.insert_placeholder_count = perf.insert_placeholder_count;
-    perf_baseline_.decompress_nanos = perf.decompress_nanos;
-    perf_baseline_.decompress_count = perf.decompress_count;
-    perf_baseline_.initialized = true;
+    sec_cache_baseline_.uncompressed_bytes = perf.uncompressed_bytes;
+    sec_cache_baseline_.compressed_bytes = perf.compressed_bytes;
+    sec_cache_baseline_.insert_real_count = perf.insert_real_count;
+    sec_cache_baseline_.insert_placeholder_count = perf.insert_placeholder_count;
+    sec_cache_baseline_.decompress_nanos = perf.decompress_nanos;
+    sec_cache_baseline_.decompress_count = perf.decompress_count;
+    sec_cache_baseline_.initialized = true;
   }
 }
 
@@ -166,6 +172,7 @@ void CacheTierMemoryController::PopulateDiskReadLatency(
   statistics_->histogramData(Histograms::READ_BLOCK_GET_MICROS, &data);
   window->disk_read_p50_us = data.median;
   window->disk_read_p99_us = data.percentile99;
+  window->disk_read_average_us = data.average;
 }
 
 // Append one sample_interval_sec snapshot: per-interval deltas from cumulative
@@ -188,67 +195,62 @@ void CacheTierMemoryController::Sample(Statistics* statistics, const Cache* cach
     return;
   }
 
-  // --- Primary block cache lookups (denominator for hit rates) ---
-  const uint64_t cur_hit =
-      statistics->getTickerCount(Tickers::BLOCK_CACHE_HIT);
-  const uint64_t cur_miss =
-      statistics->getTickerCount(Tickers::BLOCK_CACHE_MISS);
+  // BLOCK_CACHE_HIT counts primary and secondary successes; BLOCK_CACHE_MISS
+  // counts disk reads only (both tiers missed). SECONDARY_CACHE_HITS is a
+  // subset of BLOCK_CACHE_HIT on user Get/MultiGet paths.
+  const uint64_t cur_hit = statistics->getTickerCount(Tickers::BLOCK_CACHE_HIT);
+  const uint64_t cur_miss = statistics->getTickerCount(Tickers::BLOCK_CACHE_MISS);
 
   // --- Secondary tier hits (non-compressed + compressed secondary cache) ---
-  const uint64_t cur_sec =
-      statistics->getTickerCount(Tickers::SECONDARY_CACHE_HITS);
+  const uint64_t cur_sec = statistics->getTickerCount(Tickers::SECONDARY_CACHE_HITS);
 
   // --- Ghost / admission (tiered admission on compressed secondary) ---
-  const uint64_t cur_dummy = statistics->getTickerCount(
-      Tickers::COMPRESSED_SECONDARY_CACHE_DUMMY_HITS);
+  const uint64_t cur_dummy = statistics->getTickerCount(Tickers::COMPRESSED_SECONDARY_CACHE_DUMMY_HITS);
 
   const uint64_t d_hit = Delta(cur_hit, baseline_.block_cache_hit);
   const uint64_t d_miss = Delta(cur_miss, baseline_.block_cache_miss);
   const uint64_t d_sec = Delta(cur_sec, baseline_.secondary_cache_hits);
   const uint64_t d_dummy = Delta(cur_dummy, baseline_.dummy_hits);
 
-  CacheTierMemorySnapshotInternal snap;
+  CacheTierMemorySnapshot snap;
   snap.interval_us = clock_->NowMicros();
 
   // Derived hit rates over this interval.
-  snap.primary_hits_delta = d_hit;
-  snap.primary_misses_delta = d_miss;
+  const uint64_t d_primary_hit = d_hit >= d_sec ? d_hit - d_sec : 0;
   const uint64_t lookups = d_hit + d_miss;
-  snap.primary_hit_rate = SafeRate(d_hit, lookups);
-  snap.secondary_hit_rate = SafeRate(d_sec, d_miss);
+  snap.primary_lookups = lookups;
+  snap.primary_hit_rate = SafeRate(d_primary_hit, lookups);
+  const uint64_t primary_misses = d_sec + d_miss;
+  snap.secondary_hit_rate = SafeRate(d_sec, primary_misses);
+  snap.secondary_miss_count = d_miss;
 
   // Raw ghost/admission deltas for policy heuristics.
   snap.dummy_hits = d_dummy;
-
-  // Ticker-derived count of primary misses not served by secondary.
-  if (d_miss >= d_sec) {
-    snap.secondary_miss_count = d_miss - d_sec;
-  }
 
   // Partial logical SST bytes (accumulated raw key+value); not EstimateLiveDataSize.
   snap.active_sst_raw_bytes = active_sst_raw_bytes;
 
   // --- Compressed-secondary perf (insert/compress/decompress on DRAM tier) ---
-  if (sec_cache != nullptr && perf_baseline_.initialized) {
+  if (sec_cache != nullptr && sec_cache_baseline_.initialized) {
     CompressedSecondaryCacheAggregatedPerf perf;
     sec_cache->GetAggregatedPerfCounters(&perf);
     snap.sec_cache_uncompressed_bytes =
-        Delta(perf.uncompressed_bytes, perf_baseline_.uncompressed_bytes);
+        Delta(perf.uncompressed_bytes, sec_cache_baseline_.uncompressed_bytes);
     snap.sec_cache_compressed_bytes =
-        Delta(perf.compressed_bytes, perf_baseline_.compressed_bytes);
+        Delta(perf.compressed_bytes, sec_cache_baseline_.compressed_bytes);
     snap.sec_cache_insert_real =
-        Delta(perf.insert_real_count, perf_baseline_.insert_real_count);
+        Delta(perf.insert_real_count, sec_cache_baseline_.insert_real_count);
     snap.sec_cache_insert_placeholder = Delta(
-        perf.insert_placeholder_count, perf_baseline_.insert_placeholder_count);
+        perf.insert_placeholder_count, sec_cache_baseline_.insert_placeholder_count);
     snap.sec_cache_decompress_nanos =
-        Delta(perf.decompress_nanos, perf_baseline_.decompress_nanos);
+        Delta(perf.decompress_nanos, sec_cache_baseline_.decompress_nanos);
     // compressed / uncompressed byte ratio when compression ran this interval.
     if (snap.sec_cache_uncompressed_bytes > 0) {
       snap.compression_ratio = static_cast<double>(snap.sec_cache_compressed_bytes) /
                                static_cast<double>(snap.sec_cache_uncompressed_bytes);
     }
     const uint64_t d_decompress_count =
-        Delta(perf.decompress_count, perf_baseline_.decompress_count);
+        Delta(perf.decompress_count, sec_cache_baseline_.decompress_count);
     if (d_decompress_count > 0) {
       snap.mean_decompress_us =
           static_cast<double>(snap.sec_cache_decompress_nanos) /
@@ -287,7 +289,7 @@ bool CacheTierMemoryController::IsWarmedUp(
   }
   uint64_t total_lookups = 0;
   for (const auto& snap : ring_buffer_) {
-    total_lookups += snap.primary_hits_delta + snap.primary_misses_delta;
+    total_lookups += snap.primary_lookups;
   }
   return total_lookups >= options_.min_cache_lookups;
 }
@@ -318,8 +320,7 @@ Status CacheTierMemoryController::MaybeAdjust(const std::shared_ptr<Cache>& cach
   PopulateDiskReadLatency(&window);
 
   double current_ratio = window.current_secondary_ratio;
-  double target_ratio =
-      policy_->ComputeSecondaryRatio(window, current_ratio);
+  double target_ratio = policy_->ComputeSecondaryRatio(window, current_ratio);
 
   target_ratio = std::max(kMinSecondaryRatio, target_ratio);
   target_ratio = std::min(kMaxSecondaryRatio, target_ratio);
@@ -328,9 +329,8 @@ Status CacheTierMemoryController::MaybeAdjust(const std::shared_ptr<Cache>& cach
   if (std::fabs(delta) <= kRatioEpsilon) {
     return Status::OK();
   }
-  const double clamped_delta =
-      std::max(-options_.max_ratio_delta_per_step,
-               std::min(options_.max_ratio_delta_per_step, delta));
+  const double clamped_delta = std::max(-options_.max_ratio_delta_per_step,
+    std::min(options_.max_ratio_delta_per_step, delta));
   target_ratio = current_ratio + clamped_delta;
   target_ratio = std::max(kMinSecondaryRatio, target_ratio);
   target_ratio = std::min(kMaxSecondaryRatio, target_ratio);
