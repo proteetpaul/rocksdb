@@ -62,6 +62,31 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+namespace {
+
+FilterBuildingMetrics GetFilterBuildingMetrics(
+    const VersionStorageInfo* storage_info) {
+  FilterBuildingMetrics metrics;
+  if (storage_info == nullptr) {
+    return metrics;
+  }
+
+  const int num_levels = storage_info->num_levels();
+  if (num_levels <= 0) {
+    return metrics;
+  }
+
+  metrics.level_bytes.reserve(static_cast<size_t>(num_levels));
+  for (int level = 0; level < num_levels; ++level) {
+    metrics.level_bytes.push_back(storage_info->NumLevelBytes(level));
+  }
+  metrics.estimated_total_keys = storage_info->GetEstimatedActiveKeys();
+  metrics.valid = !metrics.level_bytes.empty();
+  return metrics;
+}
+
+}  // namespace
+
 const char* GetCompactionReasonString(CompactionReason compaction_reason) {
   switch (compaction_reason) {
     case CompactionReason::kUnknown:
@@ -2538,6 +2563,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
       0 /* oldest_key_time */, current_time, db_id_, db_session_id_,
       sub_compact->compaction->max_output_file_size(), file_number,
       proximal_after_seqno_ /*last_level_inclusive_max_seqno_threshold*/);
+  tboptions.filter_building_metrics =
+      GetFilterBuildingMetrics(cfd->current()->storage_info());
 
   outputs.NewBuilder(tboptions);
 

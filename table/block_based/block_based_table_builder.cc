@@ -1112,6 +1112,7 @@ struct BlockBasedTableBuilder::Rep {
     filter_context.info_log = ioptions.logger;
     filter_context.column_family_name = tbo.column_family_name;
     filter_context.reason = reason;
+    filter_context.metrics = tbo.filter_building_metrics;
 
     // Only populate other fields if known to be in LSM rather than
     // generating external SST file

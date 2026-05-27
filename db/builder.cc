@@ -46,6 +46,31 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+namespace {
+
+FilterBuildingMetrics GetFilterBuildingMetrics(
+    const VersionStorageInfo* storage_info) {
+  FilterBuildingMetrics metrics;
+  if (storage_info == nullptr) {
+    return metrics;
+  }
+
+  const int num_levels = storage_info->num_levels();
+  if (num_levels <= 0) {
+    return metrics;
+  }
+
+  metrics.level_bytes.reserve(static_cast<size_t>(num_levels));
+  for (int level = 0; level < num_levels; ++level) {
+    metrics.level_bytes.push_back(storage_info->NumLevelBytes(level));
+  }
+  metrics.estimated_total_keys = storage_info->GetEstimatedActiveKeys();
+  metrics.valid = !metrics.level_bytes.empty();
+  return metrics;
+}
+
+}  // namespace
+
 class TableFactory;
 
 TableBuilder* NewTableBuilder(const TableBuilderOptions& tboptions,
@@ -186,6 +211,10 @@ Status BuildTable(
           ioptions.file_checksum_gen_factory.get(),
           tmp_set.Contains(FileType::kTableFile), false));
 
+      if (version != nullptr) {
+        tboptions.filter_building_metrics =
+            GetFilterBuildingMetrics(version->storage_info());
+      }
       builder = NewTableBuilder(tboptions, file_writer.get());
     }
 

@@ -43,6 +43,12 @@ struct ConfigOptions;
 class FilterBitsBuilder;
 class FilterBitsReader;
 
+struct FilterBuildingMetrics {
+  std::vector<uint64_t> level_bytes;
+  uint64_t estimated_total_keys = 0;
+  bool valid = false;
+};
+
 // Contextual information passed to BloomFilterPolicy at filter building time.
 // Used in overriding FilterPolicy::GetBuilderWithContext(). References other
 // structs because this is expected to be a temporary, stack-allocated object.
@@ -80,6 +86,9 @@ struct FilterBuildingContext {
 
   // Reason for creating the file with the filter
   TableFileCreationReason reason = TableFileCreationReason::kMisc;
+
+  // Current LSM metrics sampled before table building when available.
+  FilterBuildingMetrics metrics;
 };
 
 // Determines what kind of filter (if any) to generate in SST files, and under

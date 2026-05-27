@@ -20,6 +20,7 @@
 #include "db/table_properties_collector.h"
 #include "file/writable_file_writer.h"
 #include "options/cf_options.h"
+#include "rocksdb/filter_policy.h"
 #include "rocksdb/options.h"
 #include "rocksdb/table_properties.h"
 #include "table/unique_id_impl.h"
@@ -162,6 +163,7 @@ struct TableBuilderOptions : public TablePropertiesCollectorFactory::Context {
   // BEGIN for FilterBuildingContext
   const bool is_bottommost;
   const TableFileCreationReason reason;
+  mutable FilterBuildingMetrics filter_building_metrics;
   // END for FilterBuildingContext
 
   const uint64_t cur_file_num;
