@@ -807,6 +807,7 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       db_host_id(options.db_host_id),
       checksum_handoff_file_types(options.checksum_handoff_file_types),
       lowest_used_cache_tier(options.lowest_used_cache_tier),
+      cache_tier_controller_options(options.cache_tier_controller_options),
       compaction_service(options.compaction_service),
       enforce_single_del_contracts(options.enforce_single_del_contracts),
       follower_refresh_catchup_period_ms(

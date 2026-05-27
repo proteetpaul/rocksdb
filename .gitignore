@@ -111,3 +111,11 @@ third-party/folly/
 bench/LHS/__pycache__/
 dremel/__pycache__/
 evolve-filters/evaluate/__pycache__/
+evolve-cache/openevolve_output/logs/
+evolve-cache/artifacts/
+evolve-cache/checkpoints/
+evolve-cache/openevolve_output/checkpoints/
+evolve-cache/evaluate/__pycache__/
+*.png
+*.csv
+

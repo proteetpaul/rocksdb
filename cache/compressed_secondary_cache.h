@@ -19,6 +19,19 @@
 
 namespace ROCKSDB_NAMESPACE {
 
+class CacheTierMemoryController;
+
+// Cumulative counters mirrored from PerfContext compressed_sec_cache_* metrics.
+// Always updated (not gated on PerfLevel) for DB-level tier controller sampling.
+struct CompressedSecondaryCacheAggregatedPerf {
+  uint64_t uncompressed_bytes = 0;
+  uint64_t compressed_bytes = 0;
+  uint64_t insert_real_count = 0;
+  uint64_t insert_placeholder_count = 0;
+  uint64_t decompress_nanos = 0;
+  uint64_t decompress_count = 0;
+};
+
 class CompressedSecondaryCacheResultHandle : public SecondaryCacheResultHandle {
  public:
   CompressedSecondaryCacheResultHandle(Cache::ObjectPtr value, size_t size)
@@ -105,8 +118,28 @@ class CompressedSecondaryCache : public SecondaryCache {
 
   size_t TEST_GetUsage() { return cache_->GetUsage(); }
 
+  void GetAggregatedPerfCounters(CompressedSecondaryCacheAggregatedPerf* out) const;
+
  private:
   friend class CompressedSecondaryCacheTestBase;
+  friend class CacheTierMemoryController;
+
+  void AddInsertPlaceholderCount(uint64_t count);
+  void AddUncompressedBytes(uint64_t bytes);
+  void AddCompressedBytes(uint64_t bytes);
+  void AddInsertRealCount(uint64_t count);
+  void RecordDecompress(uint64_t nanos);
+
+  struct AggregatedPerfCounters {
+    RelaxedAtomic<uint64_t> uncompressed_bytes{0};
+    RelaxedAtomic<uint64_t> compressed_bytes{0};
+    RelaxedAtomic<uint64_t> insert_real_count{0};
+    RelaxedAtomic<uint64_t> insert_placeholder_count{0};
+    RelaxedAtomic<uint64_t> decompress_nanos{0};
+    RelaxedAtomic<uint64_t> decompress_count{0};
+  };
+  AggregatedPerfCounters aggregated_perf_;
+
   static constexpr std::array<uint16_t, 8> malloc_bin_sizes_{
       128, 256, 512, 1024, 2048, 4096, 8192, 16384};
 

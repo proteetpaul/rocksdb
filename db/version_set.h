@@ -616,6 +616,12 @@ class VersionStorageInfo {
   // Returns an estimate of the amount of live data in bytes.
   uint64_t EstimateLiveDataSize() const;
 
+  // Sum of raw key+value bytes from SST files with init_stats_from_file (partial
+  // live set). Cheap to read; used by cache tier controller sampling.
+  uint64_t GetAccumulatedRawBytes() const {
+    return accumulated_raw_key_size_ + accumulated_raw_value_size_;
+  }
+
   uint64_t estimated_compaction_needed_bytes() const {
     return estimated_compaction_needed_bytes_;
   }

@@ -1467,6 +1467,9 @@ db_blob_index_test: $(OBJ_DIR)/db/blob/db_blob_index_test.o $(TEST_LIBRARY) $(LI
 db_block_cache_test: $(OBJ_DIR)/db/db_block_cache_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+db_cache_tier_controller_test: $(OBJ_DIR)/db/db_cache_tier_controller_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 db_bloom_filter_test: $(OBJ_DIR)/db/db_bloom_filter_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1906,6 +1909,9 @@ stats_history_test: $(OBJ_DIR)/monitoring/stats_history_test.o $(TEST_LIBRARY) $
 	$(AM_LINK)
 
 compressed_secondary_cache_test: $(OBJ_DIR)/cache/compressed_secondary_cache_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+cache_tier_memory_controller_test: $(OBJ_DIR)/cache/cache_tier_memory_controller_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 lru_cache_test: $(OBJ_DIR)/cache/lru_cache_test.o $(TEST_LIBRARY) $(LIBRARY)

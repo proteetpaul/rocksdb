@@ -48,6 +48,7 @@
 #include "db/memtable.h"
 #include "db/memtable_list.h"
 #include "db/merge_context.h"
+#include "cache/cache_tier_memory_controller.h"
 #include "db/periodic_task_scheduler.h"
 #include "db/range_tombstone_fragmenter.h"
 #include "db/table_cache.h"
@@ -256,6 +257,10 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
   periodic_task_functions_.emplace(
       PeriodicTaskType::kTriggerCompaction,
       [this]() { this->TriggerPeriodicCompaction(); });
+  periodic_task_functions_.emplace(PeriodicTaskType::kSampleCacheTierStats,
+                                   [this]() { this->SampleCacheTierStats(); });
+  periodic_task_functions_.emplace(PeriodicTaskType::kAdjustCacheTierMemory,
+                                   [this]() { this->AdjustCacheTierMemory(); });
 
   versions_.reset(new VersionSet(
       dbname_, &immutable_db_options_, mutable_db_options_, file_options_,
@@ -912,6 +917,52 @@ Status DBImpl::StartPeriodicTaskScheduler() {
       periodic_task_functions_.at(PeriodicTaskType::kTriggerCompaction),
       ComputeTriggerCompactionPeriod(), /*run_immediately=*/false);
 
+  const auto& tier_opts =
+      immutable_db_options_.cache_tier_controller_options;
+  if (tier_opts.enabled) {
+    if (immutable_db_options_.statistics == nullptr) {
+      ROCKS_LOG_WARN(
+          immutable_db_options_.info_log,
+          "cache_tier_controller_options.enabled requires statistics; "
+          "controller disabled");
+    } else {
+      std::shared_ptr<Cache> block_cache;
+      {
+        InstrumentedMutexLock l(&mutex_);
+        block_cache = GetBlockCacheShared();
+      }
+      if (block_cache == nullptr ||
+          !CacheSupportsTierMemoryControl(block_cache.get())) {
+        ROCKS_LOG_WARN(
+            immutable_db_options_.info_log,
+            "cache tier controller enabled but block cache does not support "
+            "tier memory control");
+      } else {
+        cache_tier_block_cache_ = block_cache;
+        cache_tier_memory_controller_ =
+            std::make_unique<CacheTierMemoryController>(
+                immutable_db_options_.clock, tier_opts);
+        const uint64_t sample_sec =
+            std::max(tier_opts.sample_interval_sec, uint64_t{1});
+        const uint64_t policy_sec =
+            std::max(tier_opts.policy_interval_sec, uint64_t{1});
+        s = periodic_task_scheduler_.Register(
+            PeriodicTaskType::kSampleCacheTierStats,
+            periodic_task_functions_.at(
+                PeriodicTaskType::kSampleCacheTierStats),
+            sample_sec, /*run_immediately=*/false);
+        if (!s.ok()) {
+          return s;
+        }
+        s = periodic_task_scheduler_.Register(
+            PeriodicTaskType::kAdjustCacheTierMemory,
+            periodic_task_functions_.at(
+                PeriodicTaskType::kAdjustCacheTierMemory),
+            policy_sec, /*run_immediately=*/false);
+      }
+    }
+  }
+
   return s;
 }
 
@@ -1147,6 +1198,73 @@ Status DBImpl::GetStatsHistory(
         new InMemoryStatsHistoryIterator(start_time, end_time, this));
   }
   return (*stats_iterator)->status();
+}
+
+std::shared_ptr<Cache> DBImpl::GetBlockCacheShared() {
+  mutex_.AssertHeld();
+  for (auto cfd : versions_->GetRefedColumnFamilySet()) {
+    if (!cfd->initialized() || cfd->IsDropped()) {
+      continue;
+    }
+    auto* table_factory =
+        cfd->GetCurrentMutableCFOptions().table_factory.get();
+    Cache* cache =
+        table_factory->GetOptions<Cache>(TableFactory::kBlockCacheOpts());
+    if (cache != nullptr) {
+      return std::shared_ptr<Cache>(cache, [](Cache*) {});
+    }
+  }
+  return nullptr;
+}
+
+ColumnFamilyData* DBImpl::GetCacheTierColumnFamilyData() {
+  mutex_.AssertHeld();
+  if (cache_tier_block_cache_ == nullptr) {
+    return nullptr;
+  }
+  Cache* const target_cache = cache_tier_block_cache_.get();
+  for (auto cfd : versions_->GetRefedColumnFamilySet()) {
+    if (!cfd->initialized() || cfd->IsDropped()) {
+      continue;
+    }
+    auto* table_factory =
+        cfd->GetCurrentMutableCFOptions().table_factory.get();
+    Cache* cache =
+        table_factory->GetOptions<Cache>(TableFactory::kBlockCacheOpts());
+    if (cache == target_cache) {
+      return cfd;
+    }
+  }
+  return nullptr;
+}
+
+void DBImpl::SampleCacheTierStats() {
+  if (shutdown_initiated_ || cache_tier_memory_controller_ == nullptr) {
+    return;
+  }
+  uint64_t active_sst_raw_bytes = 0;
+  {
+    InstrumentedMutexLock l(&mutex_);
+    ColumnFamilyData* cfd = GetCacheTierColumnFamilyData();
+    if (cfd != nullptr) {
+      const VersionStorageInfo* vstorage = cfd->current()->storage_info();
+      // O(1) read of version accumulators only. Do not call EstimateLiveDataSize()
+      // or properties that walk/read SST footers on the sample path.
+      active_sst_raw_bytes = vstorage->GetAccumulatedRawBytes();
+    }
+  }
+  cache_tier_memory_controller_->Sample(
+      immutable_db_options_.statistics.get(), cache_tier_block_cache_.get(),
+      active_sst_raw_bytes);
+}
+
+void DBImpl::AdjustCacheTierMemory() {
+  if (shutdown_initiated_ || cache_tier_memory_controller_ == nullptr ||
+      cache_tier_block_cache_ == nullptr) {
+    return;
+  }
+  cache_tier_memory_controller_->MaybeAdjust(cache_tier_block_cache_,
+                                             immutable_db_options_.info_log.get());
 }
 
 void DBImpl::DumpStats() {

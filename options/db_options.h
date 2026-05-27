@@ -98,6 +98,7 @@ struct ImmutableDBOptions {
   std::string db_host_id;
   FileTypeSet checksum_handoff_file_types;
   CacheTier lowest_used_cache_tier;
+  CacheTierControllerOptions cache_tier_controller_options;
   std::shared_ptr<CompactionService> compaction_service;
   bool enforce_single_del_contracts;
   uint64_t follower_refresh_catchup_period_ms;

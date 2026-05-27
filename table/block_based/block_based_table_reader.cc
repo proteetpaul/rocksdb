@@ -266,8 +266,6 @@ uint32_t GetBlockNumRestarts(const TBlocklike& block) {
 void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
                                             GetContext* get_context,
                                             size_t usage) const {
-  Statistics* const statistics = rep_->ioptions.stats;
-
   PERF_COUNTER_ADD(block_cache_hit_count, 1);
   PERF_COUNTER_ADD(block_cache_read_byte, usage);
   PERF_COUNTER_BY_LEVEL_ADD(block_cache_hit_count, 1,
@@ -276,9 +274,6 @@ void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
   if (get_context) {
     ++get_context->get_context_stats_.num_cache_hit;
     get_context->get_context_stats_.num_cache_bytes_read += usage;
-  } else {
-    RecordTick(statistics, BLOCK_CACHE_HIT);
-    RecordTick(statistics, BLOCK_CACHE_BYTES_READ, usage);
   }
 
   switch (block_type) {
@@ -289,8 +284,6 @@ void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
 
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_filter_hit;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_FILTER_HIT);
       }
       break;
 
@@ -299,8 +292,6 @@ void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
       PERF_COUNTER_ADD(block_cache_compression_dict_read_byte, usage);
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_compression_dict_hit;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_HIT);
       }
       break;
 
@@ -310,8 +301,6 @@ void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
 
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_index_hit;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_INDEX_HIT);
       }
       break;
 
@@ -320,8 +309,6 @@ void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
       // for range tombstones
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_data_hit;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_DATA_HIT);
       }
       break;
   }
@@ -329,16 +316,12 @@ void BlockBasedTable::UpdateCacheHitMetrics(BlockType block_type,
 
 void BlockBasedTable::UpdateCacheMissMetrics(BlockType block_type,
                                              GetContext* get_context) const {
-  Statistics* const statistics = rep_->ioptions.stats;
-
   // TODO: introduce aggregate (not per-level) block cache miss count
   PERF_COUNTER_BY_LEVEL_ADD(block_cache_miss_count, 1,
                             static_cast<uint32_t>(rep_->level));
 
   if (get_context) {
     ++get_context->get_context_stats_.num_cache_miss;
-  } else {
-    RecordTick(statistics, BLOCK_CACHE_MISS);
   }
 
   // TODO: introduce perf counters for misses per block type
@@ -347,24 +330,18 @@ void BlockBasedTable::UpdateCacheMissMetrics(BlockType block_type,
     case BlockType::kFilterPartitionIndex:
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_filter_miss;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_FILTER_MISS);
       }
       break;
 
     case BlockType::kCompressionDictionary:
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_compression_dict_miss;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_MISS);
       }
       break;
 
     case BlockType::kIndex:
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_index_miss;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_INDEX_MISS);
       }
       break;
 
@@ -373,8 +350,6 @@ void BlockBasedTable::UpdateCacheMissMetrics(BlockType block_type,
       // for range tombstones
       if (get_context) {
         ++get_context->get_context_stats_.num_cache_data_miss;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_DATA_MISS);
       }
       break;
   }
@@ -382,7 +357,7 @@ void BlockBasedTable::UpdateCacheMissMetrics(BlockType block_type,
 
 void BlockBasedTable::UpdateCacheInsertionMetrics(
     BlockType block_type, GetContext* get_context, size_t usage, bool redundant,
-    Statistics* const statistics) {
+    Statistics* const /*statistics*/) {
   // TODO: introduce perf counters for block cache insertions
   if (get_context) {
     ++get_context->get_context_stats_.num_cache_add;
@@ -390,12 +365,6 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(
       ++get_context->get_context_stats_.num_cache_add_redundant;
     }
     get_context->get_context_stats_.num_cache_bytes_write += usage;
-  } else {
-    RecordTick(statistics, BLOCK_CACHE_ADD);
-    if (redundant) {
-      RecordTick(statistics, BLOCK_CACHE_ADD_REDUNDANT);
-    }
-    RecordTick(statistics, BLOCK_CACHE_BYTES_WRITE, usage);
   }
 
   switch (block_type) {
@@ -407,12 +376,6 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(
           ++get_context->get_context_stats_.num_cache_filter_add_redundant;
         }
         get_context->get_context_stats_.num_cache_filter_bytes_insert += usage;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_FILTER_ADD);
-        if (redundant) {
-          RecordTick(statistics, BLOCK_CACHE_FILTER_ADD_REDUNDANT);
-        }
-        RecordTick(statistics, BLOCK_CACHE_FILTER_BYTES_INSERT, usage);
       }
       break;
 
@@ -425,13 +388,6 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(
         }
         get_context->get_context_stats_
             .num_cache_compression_dict_bytes_insert += usage;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_ADD);
-        if (redundant) {
-          RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_ADD_REDUNDANT);
-        }
-        RecordTick(statistics, BLOCK_CACHE_COMPRESSION_DICT_BYTES_INSERT,
-                   usage);
       }
       break;
 
@@ -442,12 +398,6 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(
           ++get_context->get_context_stats_.num_cache_index_add_redundant;
         }
         get_context->get_context_stats_.num_cache_index_bytes_insert += usage;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_INDEX_ADD);
-        if (redundant) {
-          RecordTick(statistics, BLOCK_CACHE_INDEX_ADD_REDUNDANT);
-        }
-        RecordTick(statistics, BLOCK_CACHE_INDEX_BYTES_INSERT, usage);
       }
       break;
 
@@ -460,12 +410,6 @@ void BlockBasedTable::UpdateCacheInsertionMetrics(
           ++get_context->get_context_stats_.num_cache_data_add_redundant;
         }
         get_context->get_context_stats_.num_cache_data_bytes_insert += usage;
-      } else {
-        RecordTick(statistics, BLOCK_CACHE_DATA_ADD);
-        if (redundant) {
-          RecordTick(statistics, BLOCK_CACHE_DATA_ADD_REDUNDANT);
-        }
-        RecordTick(statistics, BLOCK_CACHE_DATA_BYTES_INSERT, usage);
       }
       break;
   }

@@ -637,6 +637,24 @@ DEFINE_bool(use_tiered_cache, false,
             "that distributes cache reservations proportionally over both "
             "the caches.");
 
+DEFINE_bool(cache_tier_controller_enabled, false,
+            "Enable experimental cache tier memory controller (requires "
+            "statistics and tiered or stacked compressed secondary cache).");
+
+DEFINE_uint64(cache_tier_controller_warmup_sec, 30,
+              "Warmup time before cache tier controller adjusts split.");
+
+DEFINE_uint64(cache_tier_controller_policy_interval_sec, 10,
+              "Seconds between cache tier controller policy invocations.");
+
+DEFINE_uint64(cache_tier_controller_sample_interval_sec, 1,
+              "Seconds between cache tier controller statistic samples.");
+
+DEFINE_uint64(eval_warmup_sec, 0,
+              "If > 0 with duration > eval_warmup_sec: first N seconds allow "
+              "cache tier tuning; at boundary reset Statistics and per-thread "
+              "histograms; remaining time is measurement-only.");
+
 DEFINE_string(
     tiered_adm_policy, "auto",
     "Admission policy to use for the secondary cache(s) in the tiered cache. "
@@ -2278,10 +2296,13 @@ static std::unordered_map<OperationType, std::string, std::hash<unsigned char>>
                            {kOthers, "op"},         {kMultiScan, "multiscan"}};
 
 class CombinedStats;
+struct SharedState;
 class Stats {
  private:
   SystemClock* clock_;
   int id_;
+  SharedState* shared_ = nullptr;
+  int stats_eval_phase_ = 0;
   uint64_t start_ = 0;
   uint64_t sine_interval_;
   uint64_t finish_;
@@ -2306,6 +2327,12 @@ class Stats {
   void SetReporterAgent(ReporterAgent* reporter_agent) {
     reporter_agent_ = reporter_agent;
   }
+
+  void SetSharedState(SharedState* shared) { shared_ = shared; }
+
+  void BeginEvalPhase();
+
+  void MaybeTransitionEvalPhase(DB* db);
 
   void Start(int id) {
     id_ = id;
@@ -2408,6 +2435,7 @@ class Stats {
 
   void FinishedOps(DBWithColumnFamilies* db_with_cfh, DB* db, int64_t num_ops,
                    enum OperationType op_type = kOthers) {
+    MaybeTransitionEvalPhase(db);
     if (reporter_agent_) {
       reporter_agent_->ReportFinishedOps(num_ops);
     }
@@ -2771,7 +2799,7 @@ class TimestampEmulator {
 struct SharedState {
   port::Mutex mu;
   port::CondVar cv;
-  int total;
+  int total = 0;
   int perf_level;
   std::shared_ptr<RateLimiter> write_rate_limiter;
   std::shared_ptr<RateLimiter> read_rate_limiter;
@@ -2782,12 +2810,53 @@ struct SharedState {
   //    (3) running
   //    (4) done
 
-  long num_initialized;
-  long num_done;
-  bool start;
+  long num_initialized = 0;
+  long num_done = 0;
+  bool start = false;
+  uint64_t benchmark_start_us = 0;
+  std::atomic<int> eval_phase{0};
 
   SharedState() : cv(&mu), perf_level(FLAGS_perf_level) {}
 };
+
+void Stats::BeginEvalPhase() {
+  hist_.clear();
+  done_ = 0;
+  last_report_done_ = 0;
+  bytes_ = 0;
+  seconds_ = 0;
+  const uint64_t now = clock_->NowMicros();
+  start_ = now;
+  finish_ = now;
+  last_op_finish_ = now;
+  last_report_finish_ = now;
+  next_report_ = FLAGS_stats_interval ? FLAGS_stats_interval : 100;
+}
+
+void Stats::MaybeTransitionEvalPhase(DB* /*db*/) {
+  if (FLAGS_eval_warmup_sec == 0 || shared_ == nullptr ||
+      shared_->benchmark_start_us == 0) {
+    return;
+  }
+  const uint64_t elapsed_us =
+      clock_->NowMicros() - shared_->benchmark_start_us;
+  if (elapsed_us < FLAGS_eval_warmup_sec * 1000000U) {
+    return;
+  }
+
+  int expected = 0;
+  if (shared_->eval_phase.compare_exchange_strong(expected, 1)) {
+    if (FLAGS_statistics && dbstats != nullptr) {
+      dbstats->Reset().PermitUncheckedError();
+    }
+    shared_->eval_phase.store(2);
+  }
+
+  if (stats_eval_phase_ < 2 && shared_->eval_phase.load() >= 2) {
+    BeginEvalPhase();
+    stats_eval_phase_ = 2;
+  }
+}
 
 // Per-thread state for concurrent executions of the same benchmark.
 struct ThreadState {
@@ -2932,6 +3001,15 @@ class Benchmark {
   bool SanityCheck() {
     if (FLAGS_compression_ratio > 1) {
       fprintf(stderr, "compression_ratio should be between 0 and 1\n");
+      return false;
+    }
+    if (FLAGS_eval_warmup_sec > 0 &&
+        FLAGS_duration > 0 &&
+        FLAGS_eval_warmup_sec >= static_cast<uint64_t>(FLAGS_duration)) {
+      fprintf(stderr,
+              "eval_warmup_sec (%" PRIu64
+              ") must be less than duration (%d)\n",
+              FLAGS_eval_warmup_sec, FLAGS_duration);
       return false;
     }
     return true;
@@ -4235,6 +4313,7 @@ class Benchmark {
       total_thread_count_++;
       arg[i].thread = new ThreadState(i, total_thread_count_);
       arg[i].thread->stats.SetReporterAgent(reporter_agent.get());
+      arg[i].thread->stats.SetSharedState(&shared);
       arg[i].thread->shared = &shared;
       FLAGS_env->StartThread(ThreadBody, &arg[i]);
     }
@@ -4245,6 +4324,8 @@ class Benchmark {
     }
 
     shared.start = true;
+    shared.benchmark_start_us = FLAGS_env->NowMicros();
+    shared.eval_phase.store(0);
     shared.cv.SignalAll();
     while (shared.num_done < n) {
       shared.cv.Wait();
@@ -5083,6 +5164,18 @@ class Benchmark {
 
     if (options.statistics == nullptr) {
       options.statistics = dbstats;
+    }
+
+    if (FLAGS_cache_tier_controller_enabled) {
+      options.cache_tier_controller_options.enabled = true;
+      options.cache_tier_controller_options.warmup_time_sec =
+          FLAGS_cache_tier_controller_warmup_sec;
+      options.cache_tier_controller_options.policy_interval_sec =
+          FLAGS_cache_tier_controller_policy_interval_sec;
+      options.cache_tier_controller_options.sample_interval_sec =
+          FLAGS_cache_tier_controller_sample_interval_sec;
+      options.cache_tier_controller_options.tuning_duration_sec =
+          FLAGS_eval_warmup_sec;
     }
 
     auto table_options =

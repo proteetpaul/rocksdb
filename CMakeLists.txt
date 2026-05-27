@@ -680,6 +680,7 @@ set(SOURCES
         cache/compressed_secondary_cache.cc
         cache/lru_cache.cc
         cache/secondary_cache.cc
+        cache/cache_tier_memory_controller.cc
         cache/secondary_cache_adapter.cc
         cache/sharded_cache.cc
         cache/tiered_secondary_cache.cc
@@ -816,6 +817,7 @@ set(SOURCES
         memtable/write_buffer_manager.cc
         monitoring/histogram.cc
         monitoring/histogram_windowing.cc
+        monitoring/active_get_context_scope.cc
         monitoring/in_memory_stats_history.cc
         monitoring/instrumented_mutex.cc
         monitoring/iostats_context.cc
@@ -1355,6 +1357,7 @@ if(WITH_TESTS)
     list(APPEND TESTS
         cache/cache_reservation_manager_test.cc
         cache/cache_test.cc
+        cache/cache_tier_memory_controller_test.cc
         cache/compressed_secondary_cache_test.cc
         cache/lru_cache_test.cc
         cache/tiered_secondary_cache_test.cc
@@ -1421,6 +1424,7 @@ if(WITH_TESTS)
         db/db_with_timestamp_compaction_test.cc
         db/db_write_buffer_manager_test.cc
         db/db_write_test.cc
+        db/db_cache_tier_controller_test.cc
         db/dbformat_test.cc
         db/deletefile_test.cc
         db/error_handler_fs_test.cc

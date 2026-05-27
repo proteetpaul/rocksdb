@@ -55,6 +55,8 @@ class CacheWithSecondaryAdapter : public CacheWrapper {
 
   Status UpdateAdmissionPolicy(TieredAdmissionPolicy adm_policy);
 
+  TieredAdmissionPolicy GetAdmissionPolicy() const { return adm_policy_; }
+
   Cache* TEST_GetCache() { return target_.get(); }
 
   SecondaryCache* TEST_GetSecondaryCache() { return secondary_cache_.get(); }

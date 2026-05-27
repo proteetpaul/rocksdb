@@ -63,6 +63,7 @@
 #include "rocksdb/write_buffer_manager.h"
 #include "table/format.h"
 #include "table/get_context.h"
+#include "monitoring/active_get_context_scope.h"
 #include "table/internal_iterator.h"
 #include "table/merging_iterator.h"
 #include "table/meta_blocks.h"
@@ -2747,6 +2748,7 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
       max_covering_tombstone_seq, clock_, seq,
       merge_operator_ ? pinned_iters_mgr : nullptr, callback, is_blob_to_use,
       tracing_get_id, &blob_fetcher);
+  ActiveGetContextScope active_get_context_scope(&get_context);
 
   // Pin blocks that we read to hold merge operands
   if (merge_operator_) {

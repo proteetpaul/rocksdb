@@ -10,7 +10,9 @@
 #include <memory>
 
 #include "memory/memory_allocator_impl.h"
+#include "monitoring/active_get_context_scope.h"
 #include "monitoring/perf_context_imp.h"
+#include "rocksdb/env.h"
 #include "util/coding.h"
 #include "util/compression.h"
 #include "util/string_util.h"
@@ -59,6 +61,44 @@ CompressedSecondaryCache::CompressedSecondaryCache(
 
 CompressedSecondaryCache::~CompressedSecondaryCache() = default;
 
+void CompressedSecondaryCache::GetAggregatedPerfCounters(
+    CompressedSecondaryCacheAggregatedPerf* out) const {
+  if (out == nullptr) {
+    return;
+  }
+  out->uncompressed_bytes = aggregated_perf_.uncompressed_bytes.LoadRelaxed();
+  out->compressed_bytes = aggregated_perf_.compressed_bytes.LoadRelaxed();
+  out->insert_real_count = aggregated_perf_.insert_real_count.LoadRelaxed();
+  out->insert_placeholder_count = aggregated_perf_.insert_placeholder_count.LoadRelaxed();
+  out->decompress_nanos = aggregated_perf_.decompress_nanos.LoadRelaxed();
+  out->decompress_count = aggregated_perf_.decompress_count.LoadRelaxed();
+}
+
+void CompressedSecondaryCache::AddInsertPlaceholderCount(uint64_t count) {
+  aggregated_perf_.insert_placeholder_count.FetchAddRelaxed(count);
+  PERF_COUNTER_ADD(compressed_sec_cache_insert_dummy_count, count);
+}
+
+void CompressedSecondaryCache::AddUncompressedBytes(uint64_t bytes) {
+  aggregated_perf_.uncompressed_bytes.FetchAddRelaxed(bytes);
+  PERF_COUNTER_ADD(compressed_sec_cache_uncompressed_bytes, bytes);
+}
+
+void CompressedSecondaryCache::AddCompressedBytes(uint64_t bytes) {
+  aggregated_perf_.compressed_bytes.FetchAddRelaxed(bytes);
+  PERF_COUNTER_ADD(compressed_sec_cache_compressed_bytes, bytes);
+}
+
+void CompressedSecondaryCache::AddInsertRealCount(uint64_t count) {
+  aggregated_perf_.insert_real_count.FetchAddRelaxed(count);
+  PERF_COUNTER_ADD(compressed_sec_cache_insert_real_count, count);
+}
+
+void CompressedSecondaryCache::RecordDecompress(uint64_t nanos) {
+  aggregated_perf_.decompress_nanos.FetchAddRelaxed(nanos);
+  aggregated_perf_.decompress_count.FetchAddRelaxed(1);
+}
+
 std::unique_ptr<SecondaryCacheResultHandle> CompressedSecondaryCache::Lookup(
     const Slice& key, const Cache::CacheItemHelper* helper,
     Cache::CreateContext* create_context, bool /*wait*/, bool advise_erase,
@@ -78,7 +118,8 @@ std::unique_ptr<SecondaryCacheResultHandle> CompressedSecondaryCache::Lookup(
   void* handle_value = cache_->Value(lru_handle);
   if (handle_value == nullptr) {
     cache_->Release(lru_handle, /*erase_if_last_ref=*/false);
-    RecordTick(stats, COMPRESSED_SECONDARY_CACHE_DUMMY_HITS);
+    // Ghost/placeholder hit on user Get/MultiGet only (see active_get_context_scope.h).
+    RecordCompressedSecondaryDummyHitForUserGet(stats);
     return nullptr;
   }
 
@@ -108,7 +149,14 @@ std::unique_ptr<SecondaryCacheResultHandle> CompressedSecondaryCache::Lookup(
       assert(s.ok());  // in-memory data
       if (s.ok()) {
         uncompressed = std::make_unique<char[]>(args.uncompressed_size);
+        const uint64_t decompress_start =
+            Env::Default()->GetSystemClock().get()->NowNanos();
         s = decompressor_->DecompressBlock(args, uncompressed.get());
+        if (s.ok()) {
+          const uint64_t decompress_end =
+              Env::Default()->GetSystemClock().get()->NowNanos();
+          RecordDecompress(decompress_end - decompress_start);
+        }
         assert(s.ok());  // in-memory data
       }
       if (!s.ok()) {
@@ -161,7 +209,7 @@ bool CompressedSecondaryCache::MaybeInsertDummy(const Slice& key) {
   auto internal_helper = GetHelper(cache_options_.enable_custom_split_merge);
   Cache::Handle* lru_handle = cache_->Lookup(key);
   if (lru_handle == nullptr) {
-    PERF_COUNTER_ADD(compressed_sec_cache_insert_dummy_count, 1);
+    AddInsertPlaceholderCount(1);
     // Insert a dummy handle if the handle is evicted for the first time.
     cache_->Insert(key, /*obj=*/nullptr, internal_helper, /*charge=*/0)
         .PermitUncheckedError();
@@ -219,18 +267,15 @@ Status CompressedSecondaryCache::InsertInternal(
     if (!s.ok()) {
       return s;
     }
-    PERF_COUNTER_ADD(compressed_sec_cache_uncompressed_bytes,
-                     data_size_original);
+    AddUncompressedBytes(data_size_original);
     if (to_type == kNoCompression) {
       // Compression rejected or otherwise aborted/failed
       to_type = kNoCompression;
       tagged_compressed_data.reset();
       // TODO: consider separate counters for rejected compressions
-      PERF_COUNTER_ADD(compressed_sec_cache_compressed_bytes,
-                       data_size_original);
+      AddCompressedBytes(data_size_original);
     } else {
-      PERF_COUNTER_ADD(compressed_sec_cache_compressed_bytes,
-                       data_size_compressed);
+      AddCompressedBytes(data_size_compressed);
       if (enable_split_merge) {
         // Only need tagged_data for copying into CacheValueChunks.
         tagged_data = Slice(tagged_compressed_data.get(),
@@ -253,7 +298,7 @@ Status CompressedSecondaryCache::InsertInternal(
     }
   }
 
-  PERF_COUNTER_ADD(compressed_sec_cache_insert_real_count, 1);
+  AddInsertRealCount(1);
 
   // Save the tag fields
   const_cast<char*>(tagged_data.data())[0] = lossless_cast<char>(source);

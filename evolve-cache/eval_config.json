@@ -1,0 +1,20 @@
+{
+  "memory_limit": "1G",
+  "eval_warmup_sec": 180,
+  "eval_measure_sec": 60,
+  "bench_ini": "bench/bench.ini",
+  "load_ini": "bench/workloads/load.ini",
+  "workload_ini": "bench/workloads/readrandom.ini",
+  "base_options_file": "bench/rocksdb_options.ini",
+  "cleanup_db_dir": true,
+  "use_checkpoint": true,
+  "db_bench_flags": {
+    "use_tiered_cache": "true",
+    "use_compressed_secondary_cache": "true",
+    "cache_size": "3G",
+    "cache_tier_controller_enabled": "true",
+    "cache_tier_controller_warmup_sec": "20",
+    "cache_tier_controller_policy_interval_sec": "10",
+    "cache_tier_controller_sample_interval_sec": "1"
+  }
+}
